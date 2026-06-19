@@ -1,0 +1,22 @@
+{
+  "name": "thespark-backend",
+  "version": "1.0.0",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "cron": "node src/cron/dailyBalanceUpdate.js",
+    "cron-messages": "node src/cron/dailyMessages.js"
+  },
+  "dependencies": {
+    "@wahya/flutterwave-v4-node-sdk": "^0.1.0",
+    "axios": "^1.17.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "firebase-admin": "^11.11.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
