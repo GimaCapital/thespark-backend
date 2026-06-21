@@ -661,6 +661,59 @@
 
 
 
+// const axios = require('axios');
+
+// // Use LIVE v3 Virtual Account endpoint
+// const FLW_VIRTUAL_ACCOUNT_URL = 'https://api.flutterwave.com/v3/virtual-account-numbers';
+
+// async function createUserVirtualAccount(user) {
+//     console.log('📝 Creating LIVE virtual account for:', user.email);
+//     console.log('   Has BVN:', user.bvn ? '✅ Yes' : '❌ No');
+
+//     if (!user.bvn) {
+//         return { success: false, error: 'BVN is required for live virtual accounts' };
+//     }
+
+//     const payload = {
+//         email: user.email,
+//         is_permanent: true,
+//         bvn: user.bvn,
+//         tx_ref: `SPARK_VA_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+//         firstname: user.fullName?.split(' ')[0] || 'User',
+//         lastname: user.fullName?.split(' ')[1] || 'Name',
+//         narration: `TheSpark Project - ${user.fullName}`,
+//         phonenumber: user.phone || '08000000000',
+//         currency: 'NGN'
+//     };
+
+//     try {
+//         const response = await axios.post(FLW_VIRTUAL_ACCOUNT_URL, payload, {
+//             headers: {
+//                 'Authorization': `Bearer ${process.env.FLW_SECRET_KEY}`,
+//                 'Content-Type': 'application/json'
+//             }
+//         });
+
+//         if (response.data.status === 'success') {
+//             const data = response.data.data;
+//             console.log('✅ Virtual account created:', data.account_number);
+//             return {
+//                 success: true,
+//                 accountNumber: data.account_number,
+//                 bankName: data.bank_name,
+//                 reference: data.flw_ref
+//             };
+//         } else {
+//             throw new Error(response.data.message);
+//         }
+//     } catch (error) {
+//         console.error('❌ Error creating virtual account:', error.response?.data || error.message);
+//         return { success: false, error: error.response?.data?.message || error.message };
+//     }
+// }
+
+// module.exports = { createUserVirtualAccount };
+
 const axios = require('axios');
 
 // Use LIVE v3 Virtual Account endpoint
@@ -669,22 +722,50 @@ const FLW_VIRTUAL_ACCOUNT_URL = 'https://api.flutterwave.com/v3/virtual-account-
 async function createUserVirtualAccount(user) {
     console.log('📝 Creating LIVE virtual account for:', user.email);
     console.log('   Has BVN:', user.bvn ? '✅ Yes' : '❌ No');
+    console.log('   Has Phone:', user.phone ? '✅ Yes' : '❌ No');
+    console.log('   Full Name:', user.fullName);
+    console.log('   Phone Number:', user.phone);
 
     if (!user.bvn) {
         return { success: false, error: 'BVN is required for live virtual accounts' };
     }
+
+    // ✅ Clean up the name - remove extra spaces, trim
+    const fullName = user.fullName?.trim() || '';
+    const nameParts = fullName.split(' ').filter(part => part.length > 0);
+    
+    let firstName, lastName;
+
+    if (nameParts.length >= 2) {
+        firstName = nameParts[0];
+        lastName = nameParts.slice(1).join(' ');
+    } else if (nameParts.length === 1) {
+        firstName = nameParts[0];
+        lastName = 'TheSpark user';
+    } else {
+        firstName = 'TheSpark';
+        lastName = 'TheSpark user';
+    }
+
+    console.log('   First Name:', firstName);
+    console.log('   Last Name:', lastName);
+
+    // ✅ Use provided phone or fallback
+    const phoneNumber = user.phone || '08000000000';
 
     const payload = {
         email: user.email,
         is_permanent: true,
         bvn: user.bvn,
         tx_ref: `SPARK_VA_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-        firstname: user.fullName?.split(' ')[0] || 'User',
-        lastname: user.fullName?.split(' ')[1] || 'Name',
-        narration: `TheSpark Project - ${user.fullName}`,
-        phonenumber: user.phone || '08000000000',
+        firstname: firstName,
+        lastname: lastName,
+        narration: `TheSpark Project - ${fullName || 'TheSpark User'}`,
+        phonenumber: phoneNumber,
         currency: 'NGN'
     };
+
+    console.log('📡 Payload:', JSON.stringify(payload, null, 2));
 
     try {
         const response = await axios.post(FLW_VIRTUAL_ACCOUNT_URL, payload, {
@@ -694,6 +775,8 @@ async function createUserVirtualAccount(user) {
             }
         });
 
+        console.log('📡 Flutterwave Response:', JSON.stringify(response.data, null, 2));
+
         if (response.data.status === 'success') {
             const data = response.data.data;
             console.log('✅ Virtual account created:', data.account_number);
@@ -701,14 +784,23 @@ async function createUserVirtualAccount(user) {
                 success: true,
                 accountNumber: data.account_number,
                 bankName: data.bank_name,
-                reference: data.flw_ref
+                reference: data.flw_ref,
+                customerId: data.customer_id
             };
         } else {
-            throw new Error(response.data.message);
+            console.error('❌ Flutterwave error:', response.data);
+            return { success: false, error: response.data.message };
         }
     } catch (error) {
-        console.error('❌ Error creating virtual account:', error.response?.data || error.message);
-        return { success: false, error: error.response?.data?.message || error.message };
+        console.error('❌ Error creating virtual account:');
+        console.error('   Status:', error.response?.status);
+        console.error('   Message:', error.response?.data?.message || error.message);
+        console.error('   Full Response:', JSON.stringify(error.response?.data, null, 2));
+        return { 
+            success: false, 
+            error: error.response?.data?.message || error.message,
+            fullError: error.response?.data
+        };
     }
 }
 

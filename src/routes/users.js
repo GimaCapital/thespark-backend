@@ -338,4 +338,94 @@ router.delete('/bank-account', authenticate, async (req, res) => {
         res.status(500).json({ error: 'Failed to remove bank account' });
     }
 });
+
+// ============ BVN MANAGEMENT ROUTES ============
+
+// ✅ Update BVN
+router.post('/update-bvn', authenticate, async (req, res) => {
+    const userId = req.user.uid;
+    const { bvn } = req.body;
+    
+    try {
+        // Validate BVN format
+        if (!bvn || bvn.length !== 11 || !/^\d+$/.test(bvn)) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Invalid BVN format. Must be 11 digits.' 
+            });
+        }
+        
+        // Update user in Firebase
+        await db.collection('users').doc(userId).update({
+            bvn: bvn,
+            bvnUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        // Get updated user data
+        const userDoc = await db.collection('users').doc(userId).get();
+        const userData = userDoc.data();
+        
+        res.json({ 
+            success: true, 
+            message: 'BVN updated successfully',
+            data: { bvn: userData.bvn }
+        });
+    } catch (error) {
+        console.error('Error updating BVN:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to update BVN' 
+        });
+    }
+});
+
+// ✅ Delete BVN
+router.delete('/delete-bvn', authenticate, async (req, res) => {
+    const userId = req.user.uid;
+    
+    try {
+        await db.collection('users').doc(userId).update({
+            bvn: null,
+            bvnDeletedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        res.json({ 
+            success: true, 
+            message: 'BVN deleted successfully' 
+        });
+    } catch (error) {
+        console.error('Error deleting BVN:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to delete BVN' 
+        });
+    }
+});
+
+// ✅ Get BVN Status
+router.get('/bvn-status', authenticate, async (req, res) => {
+    const userId = req.user.uid;
+    
+    try {
+        const userDoc = await db.collection('users').doc(userId).get();
+        const userData = userDoc.data();
+        
+        res.json({
+            success: true,
+            data: {
+                hasBvn: !!userData?.bvn,
+                bvn: userData?.bvn || null,
+                hasVirtualAccount: !!userData?.flwAccountNumber,
+                flwAccountNumber: userData?.flwAccountNumber || null,
+                flwBankName: userData?.flwBankName || null
+            }
+        });
+    } catch (error) {
+        console.error('Error getting BVN status:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to get BVN status' 
+        });
+    }
+});
 module.exports = router;

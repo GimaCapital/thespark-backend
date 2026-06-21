@@ -904,14 +904,14 @@ router.get('/banks', async (req, res) => {
             }));
             
             // Show ALL banks (first 50)
-            console.log('═══════════════════════════════════════');
-            console.log('🏦 FIRST 50 BANKS FROM FLUTTERWAVE:');
-            console.log('═══════════════════════════════════════');
-            banks.slice(0, 50).forEach((bank, index) => {
-                console.log(`${index + 1}. Code: ${bank.code} | Name: ${bank.name}`);
-            });
-            console.log('═══════════════════════════════════════');
-            console.log(`✅ Total banks fetched: ${banks.length}`);
+            // console.log('═══════════════════════════════════════');
+            // console.log('🏦 FIRST 50 BANKS FROM FLUTTERWAVE:');
+            // console.log('═══════════════════════════════════════');
+            // banks.slice(0, 50).forEach((bank, index) => {
+            //     console.log(`${index + 1}. Code: ${bank.code} | Name: ${bank.name}`);
+            // });
+            // console.log('═══════════════════════════════════════');
+            // console.log(`✅ Total banks fetched: ${banks.length}`);
             
             res.json({ success: true, banks: banks });
         } else {
@@ -922,6 +922,10 @@ router.get('/banks', async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch banks' });
     }
 });
+
+
+
+
 // Create virtual account for authenticated user
 router.post('/create-account', async (req, res) => {
     const userId = req.user.uid;
