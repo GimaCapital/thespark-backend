@@ -30,7 +30,6 @@ services:
   - type: cron
     name: thespark-cron
     runtime: node
-    plan: free
     buildCommand: npm install
     startCommand: npm run cron
     schedule: "0 0 * * *"
@@ -45,7 +44,6 @@ services:
   - type: cron
     name: thespark-daily-messages
     runtime: node
-    plan: free
     buildCommand: npm install
     startCommand: npm run cron-messages
     schedule: "0 6 * * *"
