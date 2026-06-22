@@ -150,16 +150,28 @@
 //         console.error('Error:', error);
 //         process.exit(1);
 //     });
-
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 
 dotenv.config();
 
+// ✅ FIX: Properly handle the private key
+let privateKey = process.env.FIREBASE_PRIVATE_KEY;
+
+// Remove quotes if present
+if (privateKey && privateKey.startsWith('"') && privateKey.endsWith('"')) {
+    privateKey = privateKey.slice(1, -1);
+}
+
+// Replace literal \n with actual newlines
+if (privateKey && privateKey.includes('\\n')) {
+    privateKey = privateKey.replace(/\\n/g, '\n');
+}
+
 const serviceAccount = {
     projectId: process.env.FIREBASE_PROJECT_ID,
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
+    privateKey: privateKey
 };
 
 admin.initializeApp({
