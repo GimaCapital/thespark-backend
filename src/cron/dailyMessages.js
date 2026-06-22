@@ -41,6 +41,7 @@ async function sendDailyMessages() {
         
         let sentCount = 0;
         let errorCount = 0;
+        let invalidTokensRemoved = 0;
         
         // Get APP_URL from environment variable
         const appUrl = process.env.APP_URL || 'https://thespark-frontend.onrender.com';
@@ -101,18 +102,20 @@ async function sendDailyMessages() {
                     errorCount++;
                     console.error(`❌ Failed to send to ${user.fullName || user.phone}:`, error.message);
                     
-                    // Remove invalid token
+                    // ✅ FIX: Remove invalid token
                     if (error.code === 'messaging/invalid-registration-token' ||
                         error.code === 'messaging/registration-token-not-registered') {
                         await db.collection('users').doc(userDoc.id).update({
                             fcmToken: null
                         });
+                        invalidTokensRemoved++;
+                        console.log(`🗑️ Removed invalid token for ${user.fullName || user.phone}`);
                     }
                 }
             }
         }
         
-        console.log(`[${new Date().toISOString()}] Daily messages complete. Sent: ${sentCount}, Errors: ${errorCount}`);
+        console.log(`[${new Date().toISOString()}] Daily messages complete. Sent: ${sentCount}, Errors: ${errorCount}, Invalid tokens removed: ${invalidTokensRemoved}`);
     } catch (error) {
         console.error('Error sending daily messages:', error);
     }
