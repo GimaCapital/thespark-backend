@@ -10,7 +10,7 @@ if (privateKey && privateKey.startsWith('"') && privateKey.endsWith('"')) {
     privateKey = privateKey.slice(1, -1);
 }
 
-// Replace literal \n with actual newlines
+
 if (privateKey && privateKey.includes('\\n')) {
     privateKey = privateKey.replace(/\\n/g, '\n');
 }

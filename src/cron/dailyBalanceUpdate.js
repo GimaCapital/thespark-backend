@@ -391,7 +391,7 @@ async function dailyBalanceUpdate() {
         totalPool += doc.data().currentBalance;
     });
     
-    // Update admin settings
+   
     const adminRef = db.collection('adminSettings').doc('settings');
     const adminDoc = await adminRef.get();
     const settings = adminDoc.exists ? adminDoc.data() : {};
