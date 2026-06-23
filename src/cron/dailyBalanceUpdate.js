@@ -150,6 +150,9 @@
 //         console.error('Error:', error);
 //         process.exit(1);
 //     });
+
+
+
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 
@@ -230,7 +233,7 @@ async function calculateAndPayInterest(userId, cycle, avgDays1to16, totalSavedDa
     return interest;
 }
 
-// ✅ NEW: Pay referral bonus when user completes first cycle
+// ✅ Pay referral bonus when user completes first cycle
 async function payReferralBonus(userId) {
     try {
         // Check if this user was referred
@@ -282,12 +285,23 @@ async function dailyBalanceUpdate() {
     
     let updatedCount = 0;
     let interestPaidTotal = 0;
+    let skippedUsers = 0;
     
     for (const userDoc of usersSnapshot.docs) {
         const user = userDoc.data();
         const userId = userDoc.id;
         const currentDay = user.currentDay;
         
+        // ✅ FIX: Skip users who haven't started their cycle
+        const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
+        
+        if (!hasStarted) {
+            console.log(`⏳ User ${userId} hasn't started cycle yet - skipping tracking`);
+            skippedUsers++;
+            continue;
+        }
+        
+        // ✅ ONLY track users who have started
         // Record daily balance for history
         await db.collection('dailyBalances').add({
             userId,
@@ -406,6 +420,7 @@ async function dailyBalanceUpdate() {
     
     console.log(`[${new Date().toISOString()}] Daily balance update complete.`);
     console.log(`   Updated: ${updatedCount} users`);
+    console.log(`   Skipped: ${skippedUsers} users (not started yet)`);
     console.log(`   Interest paid: ₦${interestPaidTotal.toFixed(2)}`);
     console.log(`   Total savings pool: ₦${totalPool.toFixed(2)}`);
     console.log(`   Cumulative interest: ₦${(settings.cumulativeInterestPaid || 0).toFixed(2)}`);
