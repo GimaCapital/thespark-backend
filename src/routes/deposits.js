@@ -410,7 +410,6 @@
 // });
 
 // module.exports = router;
-
 const express = require('express');
 const { db } = require('../services/firebase');
 const { authenticate } = require('../middleware/auth');
@@ -463,7 +462,10 @@ router.post('/', authenticate, async (req, res) => {
         todaysDeposit: amount
     };
     
-    if (!user.hasStartedCycle) {
+    // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
+    const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
+    
+    if (!hasStarted) {
         updateData.hasStartedCycle = true;
         updateData.currentCycle = 1;
         updateData.currentDay = 1;

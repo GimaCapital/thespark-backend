@@ -1058,7 +1058,6 @@
 // });
 
 // module.exports = router;
-
 // src/routes/flutterwave.js
 const express = require('express');
 const axios = require('axios');
@@ -1235,7 +1234,10 @@ router.post('/webhook', async (req, res) => {
                         ...(currentDay <= 16 && { totalSavedDays1to16: admin.firestore.FieldValue.increment(savingsAmount) })
                     };
                     
-                    if (!user.hasStartedCycle) {
+                    // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
+                    const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
+                    
+                    if (!hasStarted) {
                         updateData.hasStartedCycle = true;
                         updateData.currentCycle = 1;
                         updateData.currentDay = 1;
@@ -1403,7 +1405,10 @@ router.post('/webhook', async (req, res) => {
                         ...(currentDay <= 16 && { totalSavedDays1to16: admin.firestore.FieldValue.increment(savingsAmount) })
                     };
                     
-                    if (!user.hasStartedCycle) {
+                    // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
+                    const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
+                    
+                    if (!hasStarted) {
                         updateData.hasStartedCycle = true;
                         updateData.currentCycle = 1;
                         updateData.currentDay = 1;

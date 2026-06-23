@@ -921,11 +921,19 @@ router.get('/users/:userId', async (req, res) => {
     }
 });
 
-// ✅ UPDATED: Withdrawal approval with fee deduction
+// ✅ FIXED: Withdrawal approval with proper error handling - variables declared outside try
 router.post('/withdrawals/:requestId/approve', async (req, res) => {
     const { requestId } = req.params;
     const adminId = req.user.uid;
     const axios = require('axios');
+    
+    // ✅ Declare variables OUTSIDE try block so they're accessible in catch
+    let request = null;
+    let requestRef = null;
+    let user = null;
+    let userRef = null;
+    let feeDetails = null;
+    let totalDeduction = 0;
     
     try {
         // 1. Check admin
@@ -935,21 +943,21 @@ router.post('/withdrawals/:requestId/approve', async (req, res) => {
         }
         
         // 2. Get withdrawal request
-        const requestRef = db.collection('withdrawalRequests').doc(requestId);
+        requestRef = db.collection('withdrawalRequests').doc(requestId);
         const requestDoc = await requestRef.get();
         
         if (!requestDoc.exists) {
             return res.status(404).json({ error: 'Request not found' });
         }
         
-        const request = requestDoc.data();
+        request = requestDoc.data();
         
         if (request.status !== 'pending') {
             return res.status(400).json({ error: 'Request already processed' });
         }
         
         // 3. Get user - ✅ CHECK IF USER EXISTS
-        const userRef = db.collection('users').doc(request.userId);
+        userRef = db.collection('users').doc(request.userId);
         const userDoc = await userRef.get();
         
         if (!userDoc.exists) {
@@ -963,11 +971,11 @@ router.post('/withdrawals/:requestId/approve', async (req, res) => {
             return res.status(400).json({ error: 'User account no longer exists' });
         }
         
-        const user = userDoc.data();
+        user = userDoc.data();
         
         // ✅ Calculate fee using imported function
-        const feeDetails = calculateWithdrawalFee(request.amount);
-        const totalDeduction = request.amount + feeDetails.totalFee;
+        feeDetails = calculateWithdrawalFee(request.amount);
+        totalDeduction = request.amount + feeDetails.totalFee;
         
         if (totalDeduction > user.currentBalance) {
             await requestRef.update({
@@ -1194,24 +1202,36 @@ router.post('/withdrawals/:requestId/approve', async (req, res) => {
             userMessage = 'Payment service configuration error. Please contact support.';
         }
         
-        // ✅ Send failure notification to user
-        await createNotification(
-            request.userId,
-            '❌ Withdrawal Failed',
-            `Your withdrawal of ₦${request.amount.toLocaleString()} failed. Error: ${userMessage}. Please try again later.`,
-            'withdrawal_failed'
-        );
+        // ✅ Send failure notification to user (using the outer request variable)
+        try {
+            if (request && request.userId) {
+                await createNotification(
+                    request.userId,
+                    '❌ Withdrawal Failed',
+                    `Your withdrawal of ₦${request.amount ? request.amount.toLocaleString() : 'unknown'} failed. Error: ${userMessage}. Please try again later.`,
+                    'withdrawal_failed'
+                );
+            }
+        } catch (notifyError) {
+            console.error('Failed to send notification:', notifyError);
+        }
         
         // ✅ Save BOTH errors to the database
-        await requestRef.update({
-            status: 'failed',
-            error: userMessage,  // User-friendly (shown in UI)
-            technicalError: technicalError,  // Technical (for admin debugging)
-            flutterwaveResponse: flutterwaveResponse,  // Full Flutterwave response
-            statusCode: statusCode,  // HTTP status code
-            processedAt: new Date(),
-            processedBy: adminId
-        });
+        try {
+            if (requestRef) {
+                await requestRef.update({
+                    status: 'failed',
+                    error: userMessage,  // User-friendly (shown in UI)
+                    technicalError: technicalError,  // Technical (for admin debugging)
+                    flutterwaveResponse: flutterwaveResponse,  // Full Flutterwave response
+                    statusCode: statusCode,  // HTTP status code
+                    processedAt: new Date(),
+                    processedBy: adminId
+                });
+            }
+        } catch (updateError) {
+            console.error('Failed to update request status:', updateError);
+        }
         
         res.status(500).json({ 
             error: 'Failed to process withdrawal', 
@@ -1222,21 +1242,28 @@ router.post('/withdrawals/:requestId/approve', async (req, res) => {
 });
 
 // ✅ FIXED: Added try/catch
+// ✅ FIXED: Get pending AND failed withdrawals (so failed ones stay visible)
 router.get('/withdrawals/pending', async (req, res) => {
     try {
-        const snapshot = await db.collection('withdrawalRequests')
+        // ✅ Get both pending AND failed withdrawals
+        const pendingSnapshot = await db.collection('withdrawalRequests')
             .where('status', '==', 'pending')
             .get();
         
-        const requests = [];
-        for (const doc of snapshot.docs) {
+        const failedSnapshot = await db.collection('withdrawalRequests')
+            .where('status', '==', 'failed')
+            .get();
+        
+        const allRequests = [];
+        
+        // Process pending withdrawals
+        for (const doc of pendingSnapshot.docs) {
             const request = doc.data();
             const userDoc = await db.collection('users').doc(request.userId).get();
             
-            // ✅ Check if user exists
             if (!userDoc.exists) {
                 console.log(`⚠️ User ${request.userId} not found for withdrawal request ${doc.id}`);
-                requests.push({
+                allRequests.push({
                     id: doc.id,
                     ...request,
                     userName: 'Deleted User',
@@ -1247,7 +1274,37 @@ router.get('/withdrawals/pending', async (req, res) => {
             
             const user = userDoc.data();
             
-            requests.push({
+            allRequests.push({
+                id: doc.id,
+                ...request,
+                userName: user.fullName || 'Unknown',
+                userBankAccount: user.bankCode ? {
+                    bankName: user.bankName,
+                    accountNumber: user.accountNumber,
+                    accountName: user.accountName,
+                    bankCode: user.bankCode
+                } : null
+            });
+        }
+        
+        // Process failed withdrawals
+        for (const doc of failedSnapshot.docs) {
+            const request = doc.data();
+            const userDoc = await db.collection('users').doc(request.userId).get();
+            
+            if (!userDoc.exists) {
+                allRequests.push({
+                    id: doc.id,
+                    ...request,
+                    userName: 'Deleted User',
+                    userBankAccount: null
+                });
+                continue;
+            }
+            
+            const user = userDoc.data();
+            
+            allRequests.push({
                 id: doc.id,
                 ...request,
                 userName: user.fullName || 'Unknown',
@@ -1261,28 +1318,27 @@ router.get('/withdrawals/pending', async (req, res) => {
         }
         
         // Sort by createdAt (oldest first)
-        requests.sort((a, b) => {
+        allRequests.sort((a, b) => {
             const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
             const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
             return dateA - dateB;
         });
         
-        res.json(requests);
+        res.json(allRequests);
     } catch (error) {
-        console.error('Error fetching pending withdrawals:', error);
-        res.status(500).json({ error: 'Failed to fetch pending withdrawals' });
+        console.error('Error fetching withdrawals:', error);
+        res.status(500).json({ error: 'Failed to fetch withdrawals' });
     }
 });
 
-// ✅ FIXED: Added user existence check
-router.post('/withdrawals/:requestId/reject', async (req, res) => {
+// ✅ NEW: Retry failed withdrawal
+router.post('/withdrawals/:requestId/retry', async (req, res) => {
     const { requestId } = req.params;
-    const { reason } = req.body;
     const adminId = req.user.uid;
     
     try {
-        // Get the withdrawal request to get userId and amount
-        const requestDoc = await db.collection('withdrawalRequests').doc(requestId).get();
+        const requestRef = db.collection('withdrawalRequests').doc(requestId);
+        const requestDoc = await requestRef.get();
         
         if (!requestDoc.exists) {
             return res.status(404).json({ error: 'Request not found' });
@@ -1290,16 +1346,64 @@ router.post('/withdrawals/:requestId/reject', async (req, res) => {
         
         const request = requestDoc.data();
         
+        if (request.status !== 'failed') {
+            return res.status(400).json({ error: 'Only failed requests can be retried' });
+        }
+        
+        // Reset status to pending
+        await requestRef.update({
+            status: 'pending',
+            error: null,
+            technicalError: null,
+            retryCount: (request.retryCount || 0) + 1,
+            retriedAt: new Date(),
+            retriedBy: adminId
+        });
+        
+        await createNotification(
+            request.userId,
+            '🔄 Withdrawal Retry',
+            `Your withdrawal of ₦${request.amount.toLocaleString()} has been reset for retry.`,
+            'withdrawal_retry'
+        );
+        
+        res.json({ 
+            success: true, 
+            message: 'Withdrawal reset to pending for retry' 
+        });
+    } catch (error) {
+        console.error('Error retrying withdrawal:', error);
+        res.status(500).json({ error: 'Failed to retry withdrawal' });
+    }
+});
+
+// ✅ FIXED: Reject withdrawal
+router.post('/withdrawals/:requestId/reject', async (req, res) => {
+    const { requestId } = req.params;
+    const { reason } = req.body;
+    const adminId = req.user.uid;
+    
+    let request = null;
+    let requestRef = null;
+    
+    try {
+        requestRef = db.collection('withdrawalRequests').doc(requestId);
+        const requestDoc = await requestRef.get();
+        
+        if (!requestDoc.exists) {
+            return res.status(404).json({ error: 'Request not found' });
+        }
+        
+        request = requestDoc.data();
+        
         if (request.status !== 'pending') {
             return res.status(400).json({ error: 'Request already processed' });
         }
         
         const rejectionReason = reason || 'No reason provided';
         
-        // Check if user exists before sending notification
         const userDoc = await db.collection('users').doc(request.userId).get();
         
-        // ✅ Send rejection notification only if user exists
         if (userDoc.exists) {
             await createNotification(
                 request.userId,
@@ -1311,7 +1415,7 @@ router.post('/withdrawals/:requestId/reject', async (req, res) => {
             console.log(`⚠️ User ${request.userId} not found, skipping notification`);
         }
         
-        await db.collection('withdrawalRequests').doc(requestId).update({
+        await requestRef.update({
             status: 'rejected',
             rejectedAt: new Date(),
             rejectedBy: adminId,
@@ -1325,9 +1429,24 @@ router.post('/withdrawals/:requestId/reject', async (req, res) => {
         });
     } catch (error) {
         console.error('Error rejecting withdrawal:', error);
+        
+        try {
+            if (requestRef) {
+                await requestRef.update({
+                    status: 'failed',
+                    error: error.message,
+                    processedAt: new Date(),
+                    processedBy: adminId
+                });
+            }
+        } catch (updateError) {
+            console.error('Failed to update request:', updateError);
+        }
+        
         res.status(500).json({ error: 'Failed to reject withdrawal' });
     }
 });
+
 // ===== END UPDATED =====
 
 // GET all flagged deposits - NO orderBy, uses manual sort like your other endpoints

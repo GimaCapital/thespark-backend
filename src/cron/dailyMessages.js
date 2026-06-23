@@ -1,4 +1,4 @@
-// const admin = require('firebase-admin');
+const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -65,8 +65,11 @@ async function sendDailyMessages() {
             let messageType = '';
             let shouldSend = false;
             
+            // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
+            const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
+            
             // ✅ CASE 1: User hasn't started cycle yet (Day 0)
-            if (!user.hasStartedCycle || user.currentDay === 0) {
+            if (!hasStarted) {
                 // Day 0 message is already shown via API (/users/me)
                 // So we skip it in cron job
                 console.log(`⏳ Skipping ${user.fullName || userId} - Day 0 message already shown via API`);
@@ -74,7 +77,7 @@ async function sendDailyMessages() {
                 continue;
             } 
             // ✅ CASE 2: User has started cycle (Day 1+)
-            else if (user.hasStartedCycle && user.currentDay > 0) {
+            else if (hasStarted && user.currentDay > 0) {
                 // Check if today is their message day
                 if (!isTodayTheirMessageDay(user)) {
                     console.log(`⏳ Skipping ${user.fullName || userId} - Day ${user.currentDay} message not scheduled for today`);

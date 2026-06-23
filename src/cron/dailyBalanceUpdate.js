@@ -150,7 +150,6 @@
 //         console.error('Error:', error);
 //         process.exit(1);
 //     });
-
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 

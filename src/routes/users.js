@@ -115,10 +115,13 @@ router.get('/me', authenticate, async (req, res) => {
     
     const user = userDoc.data();
     
-    // ✅ Handle Day 0 messages
+    // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
+    const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
+    
     let messageQuery;
-    if (!user.hasStartedCycle || user.currentDay === 0) {
+    if (!hasStarted) {
         // User is on Day 0 - get welcome message
+        console.log(`📖 User ${userId} is on Day 0 - showing welcome message`);
         messageQuery = await db.collection('dailyMessages')
             .where('cycle', '==', 0)
             .where('day', '==', 0)
@@ -126,6 +129,7 @@ router.get('/me', authenticate, async (req, res) => {
             .get();
     } else {
         // User is on Day 1+ - get their current message
+        console.log(`📖 User ${userId} is on Day ${user.currentDay}, Cycle ${user.currentCycle}`);
         messageQuery = await db.collection('dailyMessages')
             .where('cycle', '==', user.currentCycle)
             .where('day', '==', user.currentDay)
@@ -136,6 +140,8 @@ router.get('/me', authenticate, async (req, res) => {
     let todayMessage = null;
     if (!messageQuery.empty) {
         todayMessage = messageQuery.docs[0].data();
+    } else {
+        console.log(`⚠️ No message found for Day ${user.currentDay}, Cycle ${user.currentCycle}`);
     }
     
     res.json({
