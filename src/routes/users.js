@@ -95,6 +95,8 @@
 
 // module.exports = router;
 
+
+
 const express = require('express');
 const { db } = require('../services/firebase');
 const admin = require('firebase-admin');
@@ -113,11 +115,23 @@ router.get('/me', authenticate, async (req, res) => {
     
     const user = userDoc.data();
     
-    const messageQuery = await db.collection('dailyMessages')
-        .where('cycle', '==', user.currentCycle)
-        .where('day', '==', user.currentDay)
-        .limit(1)
-        .get();
+    // ✅ Handle Day 0 messages
+    let messageQuery;
+    if (!user.hasStartedCycle || user.currentDay === 0) {
+        // User is on Day 0 - get welcome message
+        messageQuery = await db.collection('dailyMessages')
+            .where('cycle', '==', 0)
+            .where('day', '==', 0)
+            .limit(1)
+            .get();
+    } else {
+        // User is on Day 1+ - get their current message
+        messageQuery = await db.collection('dailyMessages')
+            .where('cycle', '==', user.currentCycle)
+            .where('day', '==', user.currentDay)
+            .limit(1)
+            .get();
+    }
     
     let todayMessage = null;
     if (!messageQuery.empty) {
@@ -135,7 +149,6 @@ router.get('/transactions', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { limit = 50 } = req.query;
     
-    // Fetch without orderBy to avoid index requirement
     const snapshot = await db.collection('transactions')
         .where('userId', '==', userId)
         .get();
@@ -143,7 +156,6 @@ router.get('/transactions', authenticate, async (req, res) => {
     const transactions = [];
     snapshot.forEach(doc => transactions.push({ id: doc.id, ...doc.data() }));
     
-    // Sort manually by createdAt (newest first) - no index needed
     transactions.sort((a, b) => {
         const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
         const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
@@ -156,7 +168,6 @@ router.get('/transactions', authenticate, async (req, res) => {
 router.get('/interest-history', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
-    // Fetch without orderBy
     const snapshot = await db.collection('interestPayments')
         .where('userId', '==', userId)
         .get();
@@ -164,7 +175,6 @@ router.get('/interest-history', authenticate, async (req, res) => {
     const payments = [];
     snapshot.forEach(doc => payments.push({ id: doc.id, ...doc.data() }));
     
-    // Sort manually by paidDate (newest first)
     payments.sort((a, b) => {
         const dateA = a.paidDate?.toDate ? a.paidDate.toDate() : new Date(a.paidDate || 0);
         const dateB = b.paidDate?.toDate ? b.paidDate.toDate() : new Date(b.paidDate || 0);
@@ -203,7 +213,6 @@ router.get('/referrals', authenticate, async (req, res) => {
     });
 });
 
-// Save FCM token for push notifications
 router.post('/save-fcm-token', authenticate, async (req, res) => {
     const { fcmToken } = req.body;
     const userId = req.user.uid;
@@ -225,10 +234,6 @@ router.post('/save-fcm-token', authenticate, async (req, res) => {
     }
 });
 
-
-// src/routes/users.js - Add these bank account endpoints
-
-// GET - Get user's bank account
 router.get('/bank-account', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
@@ -249,7 +254,7 @@ router.get('/bank-account', authenticate, async (req, res) => {
                 bankName: user.bankName,
                 accountNumber: user.accountNumber,
                 accountName: user.accountName,
-                bankAccountUpdatedAt: user.bankAccountUpdatedAt || null  // ← ADD THIS LINE
+                bankAccountUpdatedAt: user.bankAccountUpdatedAt || null
             });
         }
         
@@ -260,37 +265,6 @@ router.get('/bank-account', authenticate, async (req, res) => {
     }
 });
 
-
-// POST - Add bank account (now receives bankCode from Flutterwave)
-// router.post('/bank-account', authenticate, async (req, res) => {
-//     const userId = req.user.uid;
-//     const { bankCode, bankName, accountNumber, accountName } = req.body;
-    
-//     if (!bankCode || !bankName || !accountNumber || !accountName) {
-//         return res.status(400).json({ error: 'All fields are required' });
-//     }
-    
-//     if (accountNumber.length !== 10) {
-//         return res.status(400).json({ error: 'Account number must be 10 digits' });
-//     }
-    
-//     try {
-//         await db.collection('users').doc(userId).update({
-//             bankCode: bankCode,        // This is Flutterwave's bank code (e.g., "044")
-//             bankName: bankName,
-//             accountNumber: accountNumber,
-//             accountName: accountName.toUpperCase(),
-//             bankAccountUpdatedAt: new Date()
-//         });
-        
-//         res.json({ success: true, message: 'Bank account added successfully' });
-//     } catch (error) {
-//         console.error('Error saving bank account:', error);
-//         res.status(500).json({ error: 'Failed to save bank account' });
-//     }
-// });
-
-// POST - Add bank account
 router.post('/bank-account', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { bankCode, bankName, accountNumber, accountName } = req.body;
@@ -309,7 +283,7 @@ router.post('/bank-account', authenticate, async (req, res) => {
             bankName: bankName,
             accountNumber: accountNumber,
             accountName: accountName.toUpperCase(),
-            bankAccountUpdatedAt: admin.firestore.FieldValue.serverTimestamp()  // ← USE THIS
+            bankAccountUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
         
         res.json({ success: true, message: 'Bank account added successfully' });
@@ -319,7 +293,6 @@ router.post('/bank-account', authenticate, async (req, res) => {
     }
 });
 
-// DELETE - Remove bank account
 router.delete('/bank-account', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
@@ -339,15 +312,11 @@ router.delete('/bank-account', authenticate, async (req, res) => {
     }
 });
 
-// ============ BVN MANAGEMENT ROUTES ============
-
-// ✅ Update BVN
 router.post('/update-bvn', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { bvn } = req.body;
     
     try {
-        // Validate BVN format
         if (!bvn || bvn.length !== 11 || !/^\d+$/.test(bvn)) {
             return res.status(400).json({ 
                 success: false, 
@@ -355,13 +324,11 @@ router.post('/update-bvn', authenticate, async (req, res) => {
             });
         }
         
-        // Update user in Firebase
         await db.collection('users').doc(userId).update({
             bvn: bvn,
             bvnUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
         
-        // Get updated user data
         const userDoc = await db.collection('users').doc(userId).get();
         const userData = userDoc.data();
         
@@ -379,7 +346,6 @@ router.post('/update-bvn', authenticate, async (req, res) => {
     }
 });
 
-// ✅ Delete BVN
 router.delete('/delete-bvn', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
@@ -402,7 +368,6 @@ router.delete('/delete-bvn', authenticate, async (req, res) => {
     }
 });
 
-// ✅ Get BVN Status
 router.get('/bvn-status', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
@@ -428,4 +393,5 @@ router.get('/bvn-status', authenticate, async (req, res) => {
         });
     }
 });
+
 module.exports = router;

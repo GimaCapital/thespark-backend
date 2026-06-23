@@ -150,6 +150,8 @@
 //         console.error('Error:', error);
 //         process.exit(1);
 //     });
+
+
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 
@@ -289,6 +291,7 @@ async function dailyBalanceUpdate() {
                 currentCycle: nextCycle,
                 currentDay: 1,
                 cycleStartDate: new Date(),
+                hasStartedCycle: true,  // ← ✅ ADD THIS LINE
                 // Reset Days 1-16 tracking
                 avgDays1to16: 0,
                 days1to16Count: 0,

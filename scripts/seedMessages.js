@@ -15,6 +15,8 @@ admin.initializeApp({
 const db = admin.firestore();
 
 const messages = [
+    // In Firestore 'dailyMessages' collection:
+    { cycle: 0, day: 0, principle: "👋 Welcome to TheSpark!", message: "Welcome to TheSpark! You've taken the first step toward financial freedom.\n\nHere's how it works:\n💰 Save daily (even ₦100 counts!)\n📈 Earn interest every 21-day cycle\n🎓 Graduate in 6 months with real wealth skills\n\nReady to begin? Make your first deposit to start Day 1 of your wealth journey! 🚀"},
     // Cycle 1: Pay Yourself First (Days 1-22)
     { cycle: 1, day: 1, principle: "Pay yourself first", message: "Welcome to TheSpark. The first principle of wealth: 'A part of all you earn is yours to keep.' Today, save your first amount. This is yours. No one will take it. Be the spark." },
     { cycle: 1, day: 2, principle: "Pay yourself first", message: "Before you pay anyone else — the landlord, the trader, the tailor — pay yourself first. Save today's money. You are now your own first creditor. Be the spark." },

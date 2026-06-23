@@ -1,4 +1,4 @@
-const admin = require('firebase-admin');
+// const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -27,11 +27,20 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+function isTodayTheirMessageDay(user) {
+    if (!user.cycleStartDate) return false;
+    
+    const today = new Date();
+    const cycleStart = user.cycleStartDate.toDate ? user.cycleStartDate.toDate() : new Date(user.cycleStartDate);
+    const daysSinceStart = Math.floor((today - cycleStart) / (1000 * 60 * 60 * 24));
+    
+    return daysSinceStart === (user.currentDay - 1);
+}
+
 async function sendDailyMessages() {
     console.log(`[${new Date().toISOString()}] Sending daily messages...`);
     
     try {
-        // Get all active users who have FCM tokens
         const usersSnapshot = await db.collection('users')
             .where('isActive', '==', true)
             .where('fcmToken', '!=', null)
@@ -42,24 +51,57 @@ async function sendDailyMessages() {
         let sentCount = 0;
         let errorCount = 0;
         let invalidTokensRemoved = 0;
+        let day1PlusSent = 0;
+        let skippedUsers = 0;
         
-        // Get APP_URL from environment variable
         const appUrl = process.env.APP_URL || 'https://thespark-frontend.onrender.com';
         
         for (const userDoc of usersSnapshot.docs) {
             const user = userDoc.data();
             const fcmToken = user.fcmToken;
+            const userId = userDoc.id;
             
-            // Get today's message based on user's current cycle and day
-            const messageQuery = await db.collection('dailyMessages')
-                .where('cycle', '==', user.currentCycle)
-                .where('day', '==', user.currentDay)
-                .limit(1)
-                .get();
+            let messageData = null;
+            let messageType = '';
+            let shouldSend = false;
             
-            if (!messageQuery.empty) {
-                const messageData = messageQuery.docs[0].data();
+            // ✅ CASE 1: User hasn't started cycle yet (Day 0)
+            if (!user.hasStartedCycle || user.currentDay === 0) {
+                // Day 0 message is already shown via API (/users/me)
+                // So we skip it in cron job
+                console.log(`⏳ Skipping ${user.fullName || userId} - Day 0 message already shown via API`);
+                skippedUsers++;
+                continue;
+            } 
+            // ✅ CASE 2: User has started cycle (Day 1+)
+            else if (user.hasStartedCycle && user.currentDay > 0) {
+                // Check if today is their message day
+                if (!isTodayTheirMessageDay(user)) {
+                    console.log(`⏳ Skipping ${user.fullName || userId} - Day ${user.currentDay} message not scheduled for today`);
+                    skippedUsers++;
+                    continue;
+                }
                 
+                // Get message for their cycle and day
+                const messageQuery = await db.collection('dailyMessages')
+                    .where('cycle', '==', user.currentCycle)
+                    .where('day', '==', user.currentDay)
+                    .limit(1)
+                    .get();
+                
+                if (!messageQuery.empty) {
+                    messageData = messageQuery.docs[0].data();
+                    messageType = `Day ${user.currentDay}, Cycle ${user.currentCycle}`;
+                    shouldSend = true;
+                } else {
+                    console.log(`⚠️ No message found for ${user.fullName || userId} - Day ${user.currentDay}, Cycle ${user.currentCycle}`);
+                    skippedUsers++;
+                    continue;
+                }
+            }
+            
+            // ✅ If we have a message, send it
+            if (shouldSend && messageData) {
                 const notification = {
                     token: fcmToken,
                     notification: {
@@ -97,25 +139,27 @@ async function sendDailyMessages() {
                 try {
                     await admin.messaging().send(notification);
                     sentCount++;
-                    console.log(`✅ Sent to ${user.fullName || user.phone}`);
+                    day1PlusSent++;
+                    console.log(`✅ ${messageType} sent to ${user.fullName || userId}`);
                 } catch (error) {
                     errorCount++;
-                    console.error(`❌ Failed to send to ${user.fullName || user.phone}:`, error.message);
+                    console.error(`❌ Failed to send to ${user.fullName || userId}:`, error.message);
                     
-                    // ✅ FIX: Remove invalid token
+                    // ✅ Remove invalid token
                     if (error.code === 'messaging/invalid-registration-token' ||
                         error.code === 'messaging/registration-token-not-registered') {
-                        await db.collection('users').doc(userDoc.id).update({
+                        await db.collection('users').doc(userId).update({
                             fcmToken: null
                         });
                         invalidTokensRemoved++;
-                        console.log(`🗑️ Removed invalid token for ${user.fullName || user.phone}`);
+                        console.log(`🗑️ Removed invalid token for ${user.fullName || userId}`);
                     }
                 }
             }
         }
         
-        console.log(`[${new Date().toISOString()}] Daily messages complete. Sent: ${sentCount}, Errors: ${errorCount}, Invalid tokens removed: ${invalidTokensRemoved}`);
+        console.log(`[${new Date().toISOString()}] Daily messages complete.`);
+        console.log(`📊 Sent: ${sentCount} (Day 1+: ${day1PlusSent}), Errors: ${errorCount}, Skipped: ${skippedUsers}, Invalid tokens removed: ${invalidTokensRemoved}`);
     } catch (error) {
         console.error('Error sending daily messages:', error);
     }

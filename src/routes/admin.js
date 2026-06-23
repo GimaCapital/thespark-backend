@@ -1670,8 +1670,8 @@ router.post('/referrals/:referralId/pay', async (req, res) => {
             userId: referral.referrerId,
             type: 'deposit',
             amount: referral.rewardAmount,
-            cycle: referrer.currentCycle || 1,
-            day: referrer.currentDay || 1,
+            cycle: referrer.currentCycle || 0,
+            day: referrer.currentDay || 0,
             balanceAfter: (referrer.currentBalance || 0) + referral.rewardAmount,
             notes: 'Referral reward',
             createdAt: new Date()
