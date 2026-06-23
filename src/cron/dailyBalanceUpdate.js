@@ -151,7 +151,6 @@
 //         process.exit(1);
 //     });
 
-
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 
@@ -232,6 +231,49 @@ async function calculateAndPayInterest(userId, cycle, avgDays1to16, totalSavedDa
     return interest;
 }
 
+// ✅ NEW: Pay referral bonus when user completes first cycle
+async function payReferralBonus(userId) {
+    try {
+        // Check if this user was referred
+        const referralsSnapshot = await db.collection('referrals')
+            .where('referredId', '==', userId)
+            .where('referrerPaid', '==', false)
+            .get();
+        
+        for (const doc of referralsSnapshot.docs) {
+            const referral = doc.data();
+            const referrerId = referral.referrerId;
+            
+            // ✅ Give referrer ₦500
+            await db.collection('users').doc(referrerId).update({
+                currentBalance: admin.firestore.FieldValue.increment(500),
+                totalPrincipalSaved: admin.firestore.FieldValue.increment(500)
+            });
+            
+            // ✅ Mark referrer as paid
+            await doc.ref.update({
+                referrerPaid: true,
+                referrerPaidAt: new Date()
+            });
+            
+            // ✅ Record transaction for referrer
+            const referrerDoc = await db.collection('users').doc(referrerId).get();
+            await db.collection('transactions').add({
+                userId: referrerId,
+                type: 'referral_bonus',
+                amount: 500,
+                description: 'Referral bonus for referring user ' + userId,
+                balanceAfter: referrerDoc.data().currentBalance || 0,
+                createdAt: new Date()
+            });
+            
+            console.log(`✅ Referrer ${referrerId} got ₦500 for referring ${userId}`);
+        }
+    } catch (error) {
+        console.error('Error paying referral bonus:', error);
+    }
+}
+
 async function dailyBalanceUpdate() {
     console.log(`[${new Date().toISOString()}] Starting daily balance update (Option B - Days 1-16 only)...`);
     
@@ -282,6 +324,11 @@ async function dailyBalanceUpdate() {
             const interest = await calculateAndPayInterest(userId, user.currentCycle, avgDays1to16, totalSavedDays1to16);
             interestPaidTotal += interest;
             
+            // ✅ Pay referral bonus if this is first cycle completion
+            if (user.currentCycle === 1) {
+                await payReferralBonus(userId);
+            }
+            
             // Move to next cycle
             const nextCycle = user.currentCycle + 1;
             const isGraduated = nextCycle > 8;
@@ -291,7 +338,7 @@ async function dailyBalanceUpdate() {
                 currentCycle: nextCycle,
                 currentDay: 1,
                 cycleStartDate: new Date(),
-                hasStartedCycle: true,  // ← ✅ ADD THIS LINE
+                hasStartedCycle: true,
                 // Reset Days 1-16 tracking
                 avgDays1to16: 0,
                 days1to16Count: 0,
