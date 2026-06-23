@@ -155,6 +155,7 @@
 
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
+const REFERRAL_CONSTANTS = require('../utils/referralConstants');
 
 dotenv.config();
 
@@ -233,7 +234,7 @@ async function calculateAndPayInterest(userId, cycle, avgDays1to16, totalSavedDa
     return interest;
 }
 
-// ✅ Pay referral bonus when user completes first cycle
+// ✅ Pay referral bonus when user completes first cycle (using constants)
 async function payReferralBonus(userId) {
     try {
         // Check if this user was referred
@@ -246,10 +247,13 @@ async function payReferralBonus(userId) {
             const referral = doc.data();
             const referrerId = referral.referrerId;
             
-            // ✅ Give referrer ₦500
+            // ✅ Use stored bonus amount or fallback to constant
+            const bonusAmount = referral.referrerBonus || REFERRAL_CONSTANTS.REFERRER_BONUS;
+            
+            // ✅ Give referrer bonus
             await db.collection('users').doc(referrerId).update({
-                currentBalance: admin.firestore.FieldValue.increment(500),
-                totalPrincipalSaved: admin.firestore.FieldValue.increment(500)
+                currentBalance: admin.firestore.FieldValue.increment(bonusAmount),
+                totalPrincipalSaved: admin.firestore.FieldValue.increment(bonusAmount)
             });
             
             // ✅ Mark referrer as paid
@@ -262,14 +266,14 @@ async function payReferralBonus(userId) {
             const referrerDoc = await db.collection('users').doc(referrerId).get();
             await db.collection('transactions').add({
                 userId: referrerId,
-                type: 'referral_bonus',
-                amount: 500,
-                description: 'Referral bonus for referring user ' + userId,
+                type: REFERRAL_CONSTANTS.TRANSACTION_TYPES.REFERRER,
+                amount: bonusAmount,
+                description: `${REFERRAL_CONSTANTS.DESCRIPTIONS.REFERRER}: ${userId}`,
                 balanceAfter: referrerDoc.data().currentBalance || 0,
                 createdAt: new Date()
             });
             
-            console.log(`✅ Referrer ${referrerId} got ₦500 for referring ${userId}`);
+            console.log(`✅ Referrer ${referrerId} got ₦${bonusAmount} for referring ${userId}`);
         }
     } catch (error) {
         console.error('Error paying referral bonus:', error);
@@ -391,7 +395,6 @@ async function dailyBalanceUpdate() {
         totalPool += doc.data().currentBalance;
     });
     
-   
     const adminRef = db.collection('adminSettings').doc('settings');
     const adminDoc = await adminRef.get();
     const settings = adminDoc.exists ? adminDoc.data() : {};

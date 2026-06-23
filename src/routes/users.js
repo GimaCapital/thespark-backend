@@ -96,14 +96,138 @@
 // module.exports = router;
 
 
-
 const express = require('express');
 const { db } = require('../services/firebase');
 const admin = require('firebase-admin');
 const { authenticate } = require('../middleware/auth');
+const REFERRAL_CONSTANTS = require('../utils/referralConstants');
 
 const router = express.Router();
 
+// ============ REFERRAL PROCESSING ENDPOINT ============
+// ✅ Process referral code (server-side with transaction)
+router.post('/process-referral', authenticate, async (req, res) => {
+    const { referralCode } = req.body;
+    const userId = req.user.uid;
+    
+    if (!referralCode) {
+        return res.json({ success: true, message: 'No referral code provided' });
+    }
+    
+    try {
+        // 1. Get the user
+        const userRef = db.collection('users').doc(userId);
+        const userDoc = await userRef.get();
+        
+        if (!userDoc.exists) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        const userData = userDoc.data();
+        
+        // 2. Check if user already has a referrer
+        if (userData.referredBy) {
+            return res.json({ 
+                success: true, 
+                message: 'User already has a referrer',
+                alreadyReferred: true 
+            });
+        }
+        
+        // 3. Find the referrer
+        const usersRef = db.collection('users');
+        const q = query(usersRef, where('referralCode', '==', referralCode));
+        const querySnapshot = await getDocs(q);
+        
+        if (querySnapshot.empty) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Invalid referral code' 
+            });
+        }
+        
+        const referrerDoc = querySnapshot.docs[0];
+        const referrerId = referrerDoc.id;
+        
+        // 4. Prevent self-referral
+        if (referrerId === userId) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'You cannot refer yourself' 
+            });
+        }
+        
+        // 5. Check if referral record already exists
+        const existingRefQuery = await db.collection('referrals')
+            .where('referredId', '==', userId)
+            .get();
+        
+        if (!existingRefQuery.empty) {
+            return res.json({ 
+                success: true, 
+                message: 'Referral already processed',
+                alreadyReferred: true 
+            });
+        }
+        
+        // 6. Use a transaction to prevent race conditions
+        await db.runTransaction(async (transaction) => {
+            // Get fresh data
+            const freshUserDoc = await transaction.get(userRef);
+            const freshUserData = freshUserDoc.data();
+            
+            // Check again if already referred
+            if (freshUserData.referredBy) {
+                return;
+            }
+            
+            // Update user with referrer
+            transaction.update(userRef, {
+                referredBy: referrerId,
+                currentBalance: admin.firestore.FieldValue.increment(REFERRAL_CONSTANTS.NEW_USER_BONUS),
+                totalPrincipalSaved: admin.firestore.FieldValue.increment(REFERRAL_CONSTANTS.NEW_USER_BONUS)
+            });
+            
+            // Create referral record
+            const referralRef = db.collection('referrals').doc();
+            transaction.set(referralRef, {
+                referrerId: referrerId,
+                referredId: userId,
+                newUserBonus: REFERRAL_CONSTANTS.NEW_USER_BONUS,
+                referrerBonus: REFERRAL_CONSTANTS.REFERRER_BONUS,
+                newUserPaid: true,
+                referrerPaid: false,
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            
+            // Create transaction record for bonus
+            const txRef = db.collection('transactions').doc();
+            transaction.set(txRef, {
+                userId: userId,
+                type: REFERRAL_CONSTANTS.TRANSACTION_TYPES.NEW_USER,
+                amount: REFERRAL_CONSTANTS.NEW_USER_BONUS,
+                description: `${REFERRAL_CONSTANTS.DESCRIPTIONS.NEW_USER} from ${referrerDoc.data().fullName}`,
+                balanceAfter: (freshUserData.currentBalance || 0) + REFERRAL_CONSTANTS.NEW_USER_BONUS,
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+        });
+        
+        res.json({ 
+            success: true, 
+            message: 'Referral processed successfully',
+            bonus: REFERRAL_CONSTANTS.NEW_USER_BONUS
+        });
+        
+    } catch (error) {
+        console.error('Error processing referral:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to process referral' 
+        });
+    }
+});
+
+// ============ GET USER PROFILE ============
 router.get('/me', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
@@ -151,6 +275,7 @@ router.get('/me', authenticate, async (req, res) => {
     });
 });
 
+// ============ GET TRANSACTIONS ============
 router.get('/transactions', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { limit = 50 } = req.query;
@@ -171,6 +296,7 @@ router.get('/transactions', authenticate, async (req, res) => {
     res.json(transactions.slice(0, parseInt(limit)));
 });
 
+// ============ GET INTEREST HISTORY ============
 router.get('/interest-history', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
@@ -190,6 +316,7 @@ router.get('/interest-history', authenticate, async (req, res) => {
     res.json(payments.slice(0, 20));
 });
 
+// ============ GET REFERRALS ============
 router.get('/referrals', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
@@ -219,6 +346,7 @@ router.get('/referrals', authenticate, async (req, res) => {
     });
 });
 
+// ============ SAVE FCM TOKEN ============
 router.post('/save-fcm-token', authenticate, async (req, res) => {
     const { fcmToken } = req.body;
     const userId = req.user.uid;
@@ -240,6 +368,7 @@ router.post('/save-fcm-token', authenticate, async (req, res) => {
     }
 });
 
+// ============ BANK ACCOUNT ROUTES ============
 router.get('/bank-account', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
@@ -318,6 +447,7 @@ router.delete('/bank-account', authenticate, async (req, res) => {
     }
 });
 
+// ============ BVN ROUTES ============
 router.post('/update-bvn', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { bvn } = req.body;
