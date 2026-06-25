@@ -297,12 +297,13 @@ async function dailyBalanceUpdate() {
         const currentDay = user.currentDay;
         
         // ✅ FIX: Skip users who haven't started their cycle
+        // This prevents non-started users from getting their day incremented
         const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
         
         if (!hasStarted) {
             console.log(`⏳ User ${userId} hasn't started cycle yet - skipping tracking`);
             skippedUsers++;
-            continue;
+            continue;  // ✅ This skips the ENTIRE loop iteration
         }
         
         // ✅ ONLY track users who have started
@@ -376,7 +377,7 @@ async function dailyBalanceUpdate() {
             
             console.log(`User ${userId}: Cycle ${user.currentCycle} complete. Days 1-16 avg: ₦${avgDays1to16.toFixed(2)}, Interest: ₦${interest.toFixed(2)}`);
         } else {
-            // Just increment day and reset todaysDeposit
+            // ✅ This only runs for users who have started
             await db.collection('users').doc(userId).update({
                 currentDay: currentDay + 1,
                 todaysDeposit: 0
