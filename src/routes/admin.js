@@ -1377,6 +1377,18 @@ router.post('/withdrawals/:requestId/retry', async (req, res) => {
     }
 });
 
+// DELETE failed withdrawal
+router.delete('/withdrawals/:requestId', authenticate, isAdmin, async (req, res) => {
+    const { requestId } = req.params;
+    
+    try {
+        await db.collection('withdrawalRequests').doc(requestId).delete();
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to delete' });
+    }
+});
+
 // ✅ FIXED: Reject withdrawal
 router.post('/withdrawals/:requestId/reject', async (req, res) => {
     const { requestId } = req.params;

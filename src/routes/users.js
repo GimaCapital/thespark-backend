@@ -101,6 +101,7 @@ const { db } = require('../services/firebase');
 const admin = require('firebase-admin');
 const { authenticate } = require('../middleware/auth');
 const REFERRAL_CONSTANTS = require('../utils/referralConstants');
+const { sendWelcomeEmail } = require('../services/emailService');
 
 const router = express.Router();
 
@@ -224,6 +225,24 @@ router.post('/process-referral', authenticate, async (req, res) => {
             success: false, 
             error: 'Failed to process referral' 
         });
+    }
+});
+
+
+router.post('/send-welcome-email', authenticate, async (req, res) => {
+    const { email, fullName } = req.body;
+    
+    try {
+        const result = await sendWelcomeEmail(email, fullName);
+        
+        if (result) {
+            res.json({ success: true, message: 'Welcome email sent' });
+        } else {
+            res.status(500).json({ error: 'Failed to send welcome email' });
+        }
+    } catch (error) {
+        console.error('Error sending welcome email:', error);
+        res.status(500).json({ error: 'Failed to send welcome email' });
     }
 });
 
