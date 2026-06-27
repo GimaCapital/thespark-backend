@@ -62,6 +62,7 @@ const graduationRoutes = require('./routes/graduation');
 const successStoriesRoutes = require('./routes/successStories'); 
 const flutterwaveRoutes = require('./routes/flutterwave');
 const investmentRoutes = require('./routes/thesparkprivateinvestment');
+const privateAccessRoutes = require('./routes/first_private_code');
 
 const app = express();
 
@@ -88,6 +89,7 @@ app.use('/api/graduation', graduationRoutes);
 app.use('/api/success-stories', successStoriesRoutes);
 app.use('/api/flutterwave', flutterwaveRoutes); 
 app.use('/api/investment', investmentRoutes);
+app.use('/api/private', privateAccessRoutes);
 
 app.use((err, req, res, next) => {
     console.error(err.stack);
