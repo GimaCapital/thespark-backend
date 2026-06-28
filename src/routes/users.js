@@ -103,6 +103,7 @@ const { authenticate } = require('../middleware/auth');
 const REFERRAL_CONSTANTS = require('../utils/referralConstants');
 const { sendWelcomeEmail } = require('../services/emailService');
 
+
 const router = express.Router();
 
 // ============ REFERRAL PROCESSING ENDPOINT ============
@@ -229,23 +230,406 @@ router.post('/process-referral', authenticate, async (req, res) => {
 });
 
 
+// ============ SEND WELCOME EMAIL WITH TRACKING ============
 router.post('/send-welcome-email', authenticate, async (req, res) => {
     const { email, fullName } = req.body;
+    const userId = req.user.uid;
+    
+    console.log('📧 Welcome email request received:', { email, fullName, userId });
+    
+    if (!email) {
+        console.error('❌ No email provided');
+        return res.status(400).json({ 
+            success: false, 
+            error: 'Email is required' 
+        });
+    }
     
     try {
-        const result = await sendWelcomeEmail(email, fullName);
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (!userDoc.exists) {
+            console.error('❌ User not found:', userId);
+            return res.status(404).json({ 
+                success: false, 
+                error: 'User not found' 
+            });
+        }
         
-        if (result) {
-            res.json({ success: true, message: 'Welcome email sent' });
+        console.log('✅ User found, sending welcome email...');
+        
+        const result = await sendWelcomeEmail(
+            email, 
+            fullName || userDoc.data().fullName || 'Saver',
+            userId
+        );
+        
+        await db.collection('users').doc(userId).update({
+            welcomeEmailSent: result.success,
+            welcomeEmailSentAt: result.success ? new Date().toISOString() : null,
+            welcomeEmailAttempts: result.attempts || 0,
+            welcomeEmailError: result.success ? null : (result.error || null),
+            welcomeEmailMessageId: result.messageId || null,
+            updatedAt: new Date().toISOString()
+        });
+        
+        await db.collection('emailLogs').add({
+            userId: userId,
+            email: email,
+            type: 'welcome',
+            success: result.success,
+            messageId: result.messageId || null,
+            attempts: result.attempts || 0,
+            error: result.error || null,
+            sentAt: new Date().toISOString(),
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        if (result.success) {
+            console.log('✅ Welcome email sent successfully to:', email);
+            res.json({ 
+                success: true, 
+                message: 'Welcome email sent',
+                data: {
+                    messageId: result.messageId,
+                    sentAt: result.sentAt
+                }
+            });
         } else {
-            res.status(500).json({ error: 'Failed to send welcome email' });
+            console.error('❌ Failed to send welcome email to:', email, result.error);
+            res.status(500).json({ 
+                success: false, 
+                error: result.error || 'Failed to send welcome email' 
+            });
         }
     } catch (error) {
-        console.error('Error sending welcome email:', error);
-        res.status(500).json({ error: 'Failed to send welcome email' });
+        console.error('❌ Error sending welcome email:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to send welcome email' 
+        });
     }
 });
 
+// ============ GET EMAIL LOGS (Admin only) ============
+router.get('/email-logs', authenticate, async (req, res) => {
+    try {
+        const adminDoc = await db.collection('users').doc(req.user.uid).get();
+        if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        
+        const snapshot = await db.collection('emailLogs')
+            .orderBy('createdAt', 'desc')
+            .limit(100)
+            .get();
+        
+        const logs = [];
+        snapshot.forEach(doc => {
+            logs.push({ 
+                id: doc.id, 
+                ...doc.data() 
+            });
+        });
+        
+        res.json(logs);
+    } catch (error) {
+        console.error('Error fetching email logs:', error);
+        res.status(500).json({ error: 'Failed to fetch email logs' });
+    }
+});
+
+// ============ GET USER EMAIL STATUS (Admin only) ============
+router.get('/user-email-status/:userId', authenticate, async (req, res) => {
+    const { userId } = req.params;
+    
+    try {
+        const adminDoc = await db.collection('users').doc(req.user.uid).get();
+        if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (!userDoc.exists) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        const user = userDoc.data();
+        
+        res.json({
+            userId: userId,
+            email: user.email,
+            fullName: user.fullName,
+            welcomeEmailSent: user.welcomeEmailSent || false,
+            welcomeEmailSentAt: user.welcomeEmailSentAt || null,
+            welcomeEmailAttempts: user.welcomeEmailAttempts || 0,
+            welcomeEmailError: user.welcomeEmailError || null,
+            welcomeEmailMessageId: user.welcomeEmailMessageId || null
+        });
+    } catch (error) {
+        console.error('Error fetching user email status:', error);
+        res.status(500).json({ error: 'Failed to fetch email status' });
+    }
+});
+
+// ============ RESEND WELCOME EMAIL (Admin only) ============
+router.post('/resend-welcome-email', authenticate, async (req, res) => {
+    const { userId } = req.body;
+    
+    console.log('📧 Resend welcome email request for userId:', userId);
+    
+    try {
+        const adminDoc = await db.collection('users').doc(req.user.uid).get();
+        if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        
+        if (!userId) {
+            return res.status(400).json({ error: 'User ID is required' });
+        }
+        
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (!userDoc.exists) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        const user = userDoc.data();
+        
+        if (!user.email) {
+            return res.status(400).json({ error: 'User has no email address' });
+        }
+        
+        console.log('📧 Sending welcome email to:', user.email);
+        
+        const result = await sendWelcomeEmail(
+            user.email,
+            user.fullName || 'Saver',
+            userId,
+            3
+        );
+        
+        await db.collection('users').doc(userId).update({
+            welcomeEmailSent: result.success,
+            welcomeEmailSentAt: result.success ? new Date().toISOString() : null,
+            welcomeEmailAttempts: result.attempts || 0,
+            welcomeEmailError: result.success ? null : (result.error || null),
+            welcomeEmailMessageId: result.messageId || null,
+            welcomeEmailResent: true,
+            welcomeEmailResentAt: new Date().toISOString(),
+            welcomeEmailResentBy: req.user.uid
+        });
+        
+        await db.collection('emailLogs').add({
+            userId: userId,
+            email: user.email,
+            type: 'welcome_resend',
+            success: result.success,
+            messageId: result.messageId || null,
+            attempts: result.attempts || 0,
+            error: result.error || null,
+            resentBy: req.user.uid,
+            sentAt: new Date().toISOString(),
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        res.json({
+            success: result.success,
+            message: result.success ? 'Welcome email resent successfully' : 'Failed to resend welcome email',
+            data: {
+                messageId: result.messageId,
+                attempts: result.attempts,
+                error: result.error || null
+            }
+        });
+    } catch (error) {
+        console.error('Error resending welcome email:', error);
+        res.status(500).json({ error: 'Failed to resend welcome email' });
+    }
+});
+
+// ============ SEND BULK WELCOME EMAILS (Admin only) ============
+router.post('/send-bulk-welcome-emails', authenticate, async (req, res) => {
+    try {
+        const adminDoc = await db.collection('users').doc(req.user.uid).get();
+        if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        
+        const usersSnapshot = await db.collection('users')
+            .where('welcomeEmailSent', '==', false)
+            .get();
+        
+        if (usersSnapshot.empty) {
+            return res.json({ 
+                success: true, 
+                message: 'All users have already received welcome emails',
+                sentCount: 0,
+                failedCount: 0
+            });
+        }
+        
+        let sentCount = 0;
+        let failedCount = 0;
+        const failedUsers = [];
+        
+        for (const doc of usersSnapshot.docs) {
+            const user = doc.data();
+            const userId = doc.id;
+            
+            if (!user.email) {
+                failedCount++;
+                failedUsers.push({ userId, email: user.email || 'No email', reason: 'No email address' });
+                continue;
+            }
+            
+            try {
+                const result = await sendWelcomeEmail(
+                    user.email,
+                    user.fullName || 'Saver',
+                    userId
+                );
+                
+                if (result.success) {
+                    await db.collection('users').doc(userId).update({
+                        welcomeEmailSent: true,
+                        welcomeEmailSentAt: new Date().toISOString(),
+                        welcomeEmailAttempts: result.attempts || 1,
+                        welcomeEmailError: null,
+                        welcomeEmailMessageId: result.messageId || null
+                    });
+                    
+                    await db.collection('emailLogs').add({
+                        userId: userId,
+                        email: user.email,
+                        type: 'welcome_bulk',
+                        success: true,
+                        messageId: result.messageId || null,
+                        attempts: result.attempts || 1,
+                        error: null,
+                        sentAt: new Date().toISOString(),
+                        createdAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                    
+                    sentCount++;
+                    console.log(`✅ Welcome email sent to: ${user.email}`);
+                } else {
+                    failedCount++;
+                    failedUsers.push({ userId, email: user.email, reason: result.error || 'Unknown error' });
+                    console.error(`❌ Failed to send email to: ${user.email}`);
+                    
+                    await db.collection('emailLogs').add({
+                        userId: userId,
+                        email: user.email,
+                        type: 'welcome_bulk',
+                        success: false,
+                        messageId: null,
+                        attempts: result.attempts || 1,
+                        error: result.error || 'Unknown error',
+                        sentAt: new Date().toISOString(),
+                        createdAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                }
+            } catch (error) {
+                failedCount++;
+                failedUsers.push({ userId, email: user.email, reason: error.message });
+                console.error(`❌ Error sending email to ${user.email}:`, error.message);
+            }
+        }
+        
+        res.json({
+            success: true,
+            message: `Sent ${sentCount} welcome emails, ${failedCount} failed`,
+            sentCount: sentCount,
+            failedCount: failedCount,
+            failedUsers: failedUsers
+        });
+    } catch (error) {
+        console.error('Error sending bulk welcome emails:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to send bulk welcome emails' 
+        });
+    }
+});
+
+// ============ GET ALL USERS (Admin only) ============
+router.get('/admin/users', authenticate, async (req, res) => {
+    try {
+        // Check if user is admin
+        const adminDoc = await db.collection('users').doc(req.user.uid).get();
+        if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        
+        const snapshot = await db.collection('users')
+            .orderBy('createdAt', 'desc')
+            .get();
+        
+        const users = [];
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            users.push({ 
+                id: doc.id,
+                userId: doc.id,
+                fullName: data.fullName || 'N/A',
+                email: data.email || 'N/A',
+                phone: data.phone || 'N/A',
+                joinDate: data.joinDate || data.createdAt || null,
+                currentBalance: data.currentBalance || 0,
+                welcomeEmailSent: data.welcomeEmailSent || false,
+                welcomeEmailSentAt: data.welcomeEmailSentAt || null,
+                welcomeEmailAttempts: data.welcomeEmailAttempts || 0,
+                role: data.role || 'user',
+                isActive: data.isActive !== undefined ? data.isActive : true,
+                createdAt: data.createdAt || null
+            });
+        });
+        
+        res.json(users);
+    } catch (error) {
+        console.error('Error fetching users:', error);
+        res.status(500).json({ error: 'Failed to fetch users' });
+    }
+});
+
+// ============ GET ALL USERS (Alternative route - if you prefer /users/all) ============
+router.get('/all', authenticate, async (req, res) => {
+    try {
+        // Check if user is admin
+        const adminDoc = await db.collection('users').doc(req.user.uid).get();
+        if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        
+        const snapshot = await db.collection('users')
+            .orderBy('createdAt', 'desc')
+            .get();
+        
+        const users = [];
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            users.push({ 
+                id: doc.id,
+                userId: doc.id,
+                fullName: data.fullName || 'N/A',
+                email: data.email || 'N/A',
+                phone: data.phone || 'N/A',
+                joinDate: data.joinDate || data.createdAt || null,
+                currentBalance: data.currentBalance || 0,
+                welcomeEmailSent: data.welcomeEmailSent || false,
+                welcomeEmailSentAt: data.welcomeEmailSentAt || null,
+                welcomeEmailAttempts: data.welcomeEmailAttempts || 0,
+                role: data.role || 'user',
+                isActive: data.isActive !== undefined ? data.isActive : true,
+                createdAt: data.createdAt || null
+            });
+        });
+        
+        res.json(users);
+    } catch (error) {
+        console.error('Error fetching users:', error);
+        res.status(500).json({ error: 'Failed to fetch users' });
+    }
+});
 // ============ GET USER PROFILE ============
 router.get('/me', authenticate, async (req, res) => {
     const userId = req.user.uid;

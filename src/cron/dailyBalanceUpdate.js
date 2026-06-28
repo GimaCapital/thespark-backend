@@ -290,24 +290,40 @@ async function dailyBalanceUpdate() {
     let updatedCount = 0;
     let interestPaidTotal = 0;
     let skippedUsers = 0;
+    let fixedUsers = 0;
     
     for (const userDoc of usersSnapshot.docs) {
         const user = userDoc.data();
         const userId = userDoc.id;
         const currentDay = user.currentDay;
         
-        // ✅ FIX: Skip users who haven't started their cycle
-        // This prevents non-started users from getting their day incremented
-        const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
+        // ✅ FIX: Only use hasStartedCycle as the definitive check
+        // If hasStartedCycle is false, user should be on Day 0
+        const hasStarted = user.hasStartedCycle === true;
+        
+        // ✅ FIX: If hasStartedCycle is false but currentDay > 0, reset it to 0
+        if (!hasStarted && currentDay > 0) {
+            console.log(`🔄 FIX: User ${userId} has hasStartedCycle: false but currentDay: ${currentDay} - Resetting to Day 0`);
+            await db.collection('users').doc(userId).update({
+                currentDay: 0,
+                days1to16Count: 0,
+                avgDays1to16: 0,
+                days1to16TotalBalance: 0,
+                totalSavedDays1to16: 0,
+                todaysDeposit: 0
+            });
+            fixedUsers++;
+            skippedUsers++;
+            continue;
+        }
         
         if (!hasStarted) {
             console.log(`⏳ User ${userId} hasn't started cycle yet - skipping tracking`);
             skippedUsers++;
-            continue;  // ✅ This skips the ENTIRE loop iteration
+            continue; 
         }
         
-        // ✅ ONLY track users who have started
-        // Record daily balance for history
+        // ✅ ONLY run for users who have actually started
         await db.collection('dailyBalances').add({
             userId,
             date: new Date(),
@@ -377,7 +393,7 @@ async function dailyBalanceUpdate() {
             
             console.log(`User ${userId}: Cycle ${user.currentCycle} complete. Days 1-16 avg: ₦${avgDays1to16.toFixed(2)}, Interest: ₦${interest.toFixed(2)}`);
         } else {
-            // ✅ This only runs for users who have started
+            // ✅ Only runs for users who have started
             await db.collection('users').doc(userId).update({
                 currentDay: currentDay + 1,
                 todaysDeposit: 0
@@ -424,6 +440,7 @@ async function dailyBalanceUpdate() {
     
     console.log(`[${new Date().toISOString()}] Daily balance update complete.`);
     console.log(`   Updated: ${updatedCount} users`);
+    console.log(`   Fixed: ${fixedUsers} users (had incorrect currentDay)`);
     console.log(`   Skipped: ${skippedUsers} users (not started yet)`);
     console.log(`   Interest paid: ₦${interestPaidTotal.toFixed(2)}`);
     console.log(`   Total savings pool: ₦${totalPool.toFixed(2)}`);

@@ -634,7 +634,7 @@ const sendOTPEmail = async (email, fullName, otp, accessCode) => {
 `;
     try {
         const mailOptions = {
-            from: process.env.EMAIL_FROM || process.env.GMAIL_USER,
+            from: `"TheSpark Investment Team" <${process.env.EMAIL_FROM_PRIVATE_INVESTOR || process.env.GMAIL_USER}>`,
             to: email,
             subject: '🔐 Your Investment Verification Code',
             html: htmlContent
@@ -1636,9 +1636,8 @@ router.post('/send-investor-email', authenticate, async (req, res) => {
             </body>
             </html>
         `;
-
         const mailOptions = {
-            from: process.env.EMAIL_FROM || process.env.GMAIL_USER,
+            from: `"TheSpark Investment Team" <${process.env.EMAIL_FROM_PRIVATE_INVESTOR || process.env.GMAIL_USER}>`,
             to: email,
             subject: `📊 Private Investment Opportunity - TheSpark (₦${parseInt(investmentAmount).toLocaleString()})`,
             html: htmlContent
