@@ -143,15 +143,23 @@ const setupTransporter = () => {
     }
     
     try {
+        // Fixed: Use explicit SMTP configuration instead of 'service: gmail'
+        // This resolves the ENETUNREACH error on Render
         transporter = nodemailer.createTransport({
-            service: 'gmail',
+            host: 'smtp.gmail.com',
+            port: 465,
+            secure: true, // true for 465, false for other ports
             auth: {
                 user: process.env.GMAIL_USER,
                 pass: process.env.GMAIL_APP_PASSWORD
             },
-            connectionTimeout: 10000,
-            greetingTimeout: 10000,
-            socketTimeout: 10000
+            pool: true,
+            maxConnections: 1,
+            rateLimit: true,
+            maxMessages: 5,
+            connectionTimeout: 30000,
+            greetingTimeout: 30000,
+            socketTimeout: 30000
         });
         
         transporter.verify((error) => {
