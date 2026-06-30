@@ -207,11 +207,13 @@ router.post('/products/submit', authenticate, async (req, res) => {
     }
 });
 
+// src/routes/marketplace.js
+
 // Update product (authenticated - user's own product)
 router.put('/products/update/:productId', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { productId } = req.params;
-    const { name, category, originalPrice, discountPrice, description, unit, stock, image } = req.body;
+    const { name, category, originalPrice, discountPrice, description, unit, stock, image, imageSource } = req.body;
     
     try {
         const productRef = db.collection('marketplace_products').doc(productId);
@@ -222,16 +224,21 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
         }
         
         const productData = productDoc.data();
+        
+        // Check if user owns the product
         if (productData.userId !== userId) {
             return res.status(403).json({ error: 'You can only edit your own products' });
         }
         
+        // ✅ Allow editing if rejected OR pending
         if (productData.status === 'approved') {
             return res.status(400).json({ error: 'Cannot edit approved products. Please contact admin.' });
         }
         
+        // Calculate discount percentage
         const discount = Math.round(((originalPrice - discountPrice) / originalPrice) * 100);
         
+        // ✅ Update product and reset status to pending for re-approval
         await productRef.update({
             name: name.trim(),
             category: category,
@@ -239,29 +246,60 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
             discountPrice: discountPrice,
             discount: discount,
             image: image || '📦',
+            imageSource: imageSource || null,
             description: description.trim(),
             unit: unit || 'unit',
             stock: stock || 0,
-            status: 'pending',
-            updatedAt: new Date().toISOString()
+            status: 'pending', // ✅ Reset to pending for re-approval
+            updatedAt: new Date().toISOString(),
+            resubmittedAt: new Date().toISOString(),
+            rejectionReason: null // ✅ Clear rejection reason on resubmission
         });
         
-        // Notify admin about update
+        // ✅ Notify admins about resubmission
         const adminsSnapshot = await db.collection('users')
             .where('role', '==', 'admin')
             .get();
         
+        const notificationPromises = [];
         adminsSnapshot.forEach(async (adminDoc) => {
-            await createNotification(
+            const promise = createNotification(
                 adminDoc.id,
-                '🔄 Product Updated',
-                `${productData.sellerName || 'A user'} updated "${name}" for re-approval`,
-                'product_updated',
-                { productId: productId }
+                '🔄 Product Resubmitted',
+                `${productData.sellerName || 'A user'} resubmitted "${name}" for approval after ${productData.status === 'rejected' ? 'rejection' : 'update'}`,
+                'product_resubmitted',
+                { 
+                    productId: productId,
+                    previousStatus: productData.status,
+                    sellerId: userId
+                }
             );
+            notificationPromises.push(promise);
         });
         
-        res.json({ success: true, message: 'Product updated and resubmitted for approval' });
+        await Promise.all(notificationPromises);
+        
+        // ✅ Log the resubmission
+        await db.collection('productActivityLogs').add({
+            productId: productId,
+            userId: userId,
+            action: 'resubmitted',
+            previousStatus: productData.status,
+            newStatus: 'pending',
+            timestamp: new Date().toISOString(),
+            details: {
+                name: name.trim(),
+                category: category,
+                originalPrice: originalPrice,
+                discountPrice: discountPrice
+            }
+        });
+        
+        res.json({ 
+            success: true, 
+            message: 'Product updated and resubmitted for approval',
+            status: 'pending'
+        });
     } catch (error) {
         console.error('Error updating product:', error);
         res.status(500).json({ error: 'Failed to update product' });
@@ -324,6 +362,9 @@ router.get('/admin/pending', authenticate, isAdmin, async (req, res) => {
 });
 
 // Admin: Approve a product
+// src/routes/marketplace.js
+
+// Admin: Approve a product - WITH AUTO-ADD TO STOCK
 router.post('/admin/approve/:productId', authenticate, isAdmin, async (req, res) => {
     const { productId } = req.params;
     
@@ -336,23 +377,76 @@ router.post('/admin/approve/:productId', authenticate, isAdmin, async (req, res)
         }
         
         const product = productDoc.data();
+        let stockPhotoAdded = false;
+
+        // ✅ AUTO-ADD: If product has an image, add it to stock photos
+        if (product.image && product.image !== '📦') {
+            try {
+                // Check if image already exists in stock (avoid duplicates)
+                const existingStock = await db.collection('stockPhotos')
+                    .where('url', '==', product.image)
+                    .get();
+
+                if (existingStock.empty) {
+                    const stockPhotoData = {
+                        category: product.category || 'others',
+                        url: product.image, // ← Reuse the same Cloudinary URL!
+                        fileName: `user_uploaded_${product.userId}_${Date.now()}`,
+                        fileSize: 0,
+                        fileType: 'image/jpeg',
+                        uploadedBy: product.userId,
+                        uploadedByEmail: product.sellerEmail || 'unknown',
+                        uploadedAt: new Date().toISOString(),
+                        isActive: true,
+                        isDefault: false,
+                        usedCount: 0,
+                        source: 'user_uploaded',
+                        sourceProductId: productId,
+                        sourceProductName: product.name,
+                        uploadedByFullName: product.sellerName || 'Unknown Seller'
+                    };
+
+                    await db.collection('stockPhotos').add(stockPhotoData);
+                    stockPhotoAdded = true;
+                    console.log(`✅ Auto-added user image to stock: ${product.name}`);
+                } else {
+                    // Image already in stock, just update usage count
+                    const existingDoc = existingStock.docs[0];
+                    await existingDoc.ref.update({
+                        usedCount: (existingDoc.data().usedCount || 0) + 1,
+                        sourceProductId: productId,
+                        sourceProductName: product.name
+                    });
+                    console.log(`📸 Image already in stock, usage count updated: ${product.name}`);
+                }
+            } catch (stockError) {
+                console.error('Error adding to stock:', stockError);
+                // Don't fail the approval if stock addition fails
+            }
+        }
         
+        // Update product status
         await productRef.update({
             status: 'approved',
             approvedAt: new Date().toISOString(),
-            approvedBy: req.user.uid
+            approvedBy: req.user.uid,
+            stockPhotoAdded: stockPhotoAdded
         });
         
         // Notify seller
         await createNotification(
             product.userId,
             '✅ Product Approved!',
-            `Your product "${product.name}" has been approved and is now live on the marketplace.`,
+            `Your product "${product.name}" has been approved and is now live on the marketplace.${stockPhotoAdded ? ' Your product image has also been added to our stock photo library!' : ''}`,
             'product_approved',
             { productId: productId }
         );
         
-        res.json({ success: true, message: 'Product approved successfully' });
+        res.json({ 
+            success: true, 
+            message: 'Product approved successfully',
+            stockPhotoAdded: stockPhotoAdded
+        });
     } catch (error) {
         console.error('Error approving product:', error);
         res.status(500).json({ error: 'Failed to approve product' });
