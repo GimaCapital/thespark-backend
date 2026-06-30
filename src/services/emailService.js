@@ -130,6 +130,7 @@ require('dotenv').config();
 
 let transporter = null;
 let isEmailConfigured = false;
+let verificationPromise = null;
 
 const setupTransporter = () => {
     console.log('📧 Setting up email transporter...');
@@ -139,16 +140,15 @@ const setupTransporter = () => {
     if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
         console.warn('⚠️ Email not configured.');
         isEmailConfigured = false;
+        verificationPromise = Promise.resolve(false);
         return;
     }
     
     try {
-        // Fixed: Use explicit SMTP configuration instead of 'service: gmail'
-        // This resolves the ENETUNREACH error on Render
         transporter = nodemailer.createTransport({
             host: 'smtp.gmail.com',
             port: 465,
-            secure: true, // true for 465, false for other ports
+            secure: true,
             auth: {
                 user: process.env.GMAIL_USER,
                 pass: process.env.GMAIL_APP_PASSWORD
@@ -162,18 +162,24 @@ const setupTransporter = () => {
             socketTimeout: 30000
         });
         
-        transporter.verify((error) => {
-            if (error) {
-                console.error('❌ Email transporter verification failed:', error.message);
-                isEmailConfigured = false;
-            } else {
-                console.log('✅ Email transporter ready!');
-                isEmailConfigured = true;
-            }
+        verificationPromise = new Promise((resolve) => {
+            transporter.verify((error) => {
+                if (error) {
+                    console.error('❌ Email transporter verification failed:', error.message);
+                    isEmailConfigured = false;
+                    resolve(false);
+                } else {
+                    console.log('✅ Email transporter ready!');
+                    isEmailConfigured = true;
+                    resolve(true);
+                }
+            });
         });
+        
     } catch (error) {
         console.error('❌ Failed to create email transporter:', error.message);
         isEmailConfigured = false;
+        verificationPromise = Promise.resolve(false);
     }
 };
 
@@ -182,12 +188,27 @@ setupTransporter();
 // ============ SEND WELCOME EMAIL WITH TRACKING ============
 const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) => {
     console.log(`📧 Attempting to send welcome email to: ${email}`);
+    
+    if (verificationPromise) {
+        console.log('⏳ Waiting for email transporter verification...');
+        await verificationPromise;
+        console.log('✅ Verification complete. Email configured:', isEmailConfigured);
+    }
+    
     console.log('Transporter status:', transporter ? '✅ Available' : '❌ Not available');
     console.log('Email configured:', isEmailConfigured ? '✅ Yes' : '❌ No');
     
     if (!isEmailConfigured || !transporter) {
-        console.error('❌ Email not configured. Cannot send welcome email.');
-        return { success: false, error: 'Email not configured' };
+        console.warn('🔄 Email not configured. Attempting to reinitialize...');
+        setupTransporter();
+        if (verificationPromise) {
+            await verificationPromise;
+        }
+        
+        if (!isEmailConfigured || !transporter) {
+            console.warn('⚠️ Email still not configured. Skipping welcome email.');
+            return { success: false, error: 'Email not configured', skipped: true };
+        }
     }
     
     if (!email) {
@@ -203,7 +224,7 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
         try {
             console.log(`📧 Attempt ${attempt} of ${maxRetries} to send welcome email to ${email}`);
             
-            const appUrl = process.env.APP_URL || 'http://localhost:3000';
+            const appUrl = process.env.APP_URL || 'https://thespark-frontend.onrender.com';
             const fromEmail = process.env.EMAIL_FROM_PRIVATE_INVESTOR || process.env.GMAIL_USER;
             
             const htmlContent = `
@@ -386,7 +407,6 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
                             border-top: 2px solid #f5f0e8;
                             margin: 20px 0;
                         }
-                        /* ✅ COMPACT FOOTER - WON'T GET TRIMMED */
                         .footer {
                             background: #f8f4ea;
                             padding: 20px 40px;
@@ -454,18 +474,15 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
                     </style>
                 </head>
                 <body>
-                    <!-- Preheader text -->
                     <div class="preheader">Welcome to TheSpark - Your wealth-building journey starts here. Complete your profile and make your first deposit today.</div>
                     
                     <div class="container">
-                        <!-- Header -->
                         <div class="header">
                             <div class="logo">🔥 The<span>Spark</span></div>
                             <div class="subtitle">Welcome to TheSpark!</div>
                             <div class="badge">⭐ YOU Are Our Spark</div>
                         </div>
                         
-                        <!-- Content -->
                         <div class="content">
                             <p style="font-size: 20px; font-weight: 600; color: #1a1a2e; margin-bottom: 12px;">Hello <strong>${fullName || 'Saver'}</strong>, 👋</p>
                             
@@ -481,7 +498,6 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
                             
                             <div class="steps-grid">
                                 <div class="step-card">
-                                
                                     <div class="step-content">
                                         <span class="step-title">✅ Complete Your Profile</span>
                                         <span class="step-desc">Add your details to get the most out of TheSpark</span>
@@ -490,7 +506,6 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
                                 </div>
                                 
                                 <div class="step-card">
-                                  
                                     <div class="step-content">
                                         <span class="step-title">💰 Make Your First Deposit</span>
                                         <span class="step-desc">Start earning daily interest on your savings</span>
@@ -499,7 +514,6 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
                                 </div>
                                 
                                 <div class="step-card">
-                                 
                                     <div class="step-content">
                                         <span class="step-title">📈 Track Your Progress</span>
                                         <span class="step-desc">Watch your savings grow in real-time</span>
@@ -508,7 +522,6 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
                                 </div>
                                 
                                 <div class="step-card">
-                                   
                                     <div class="step-content">
                                         <span class="step-title">👥 Refer Friends</span>
                                         <span class="step-desc">Earn <strong style="color: #f0b429;">₦500</strong> per successful referral</span>
@@ -517,7 +530,6 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
                                 </div>
                                 
                                 <div class="step-card">
-                                   
                                     <div class="step-content">
                                         <span class="step-title">📖 Read Daily Lessons</span>
                                         <span class="step-desc">Improve your financial literacy every day</span>
@@ -551,7 +563,6 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
                             </p>
                         </div>
                         
-                        <!-- ✅ COMPACT FOOTER - Reduced size to avoid trimming -->
                         <div class="footer">
                             <div class="social">
                                 <a href="#" style="color: #1a1a2e;">📱</a>
@@ -602,7 +613,7 @@ const sendWelcomeEmail = async (email, fullName, userId = null, maxRetries = 3) 
             
         } catch (error) {
             lastError = error;
-            console.error(`❌ Attempt ${attempt} failed to send welcome email:`, error.message);
+            console.error(`❌ Attempt ${attempt} failed:`, error.message);
             
             if (error.message.includes('Invalid login')) {
                 console.error('❌ Gmail authentication failed! Check your GMAIL_USER and GMAIL_APP_PASSWORD');
