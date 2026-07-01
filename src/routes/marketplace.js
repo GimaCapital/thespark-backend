@@ -61,7 +61,6 @@ router.get('/products', async (req, res) => {
             products.push({ id: doc.id, ...doc.data() });
         });
         
-        // Sort in memory by createdAt (newest first)
         products.sort((a, b) => {
             const dateA = new Date(a.createdAt || 0);
             const dateB = new Date(b.createdAt || 0);
@@ -75,12 +74,11 @@ router.get('/products', async (req, res) => {
     }
 });
 
-// ✅ FIXED: Get user's own products (authenticated) - without 'in' operator
+// Get user's own products
 router.get('/my-products', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
     try {
-        // ✅ Get ALL products for the user (no 'in' operator)
         const snapshot = await db.collection('marketplace_products')
             .where('userId', '==', userId)
             .get();
@@ -90,7 +88,6 @@ router.get('/my-products', authenticate, async (req, res) => {
             products.push({ id: doc.id, ...doc.data() });
         });
         
-        // Sort in memory by createdAt (newest first)
         products.sort((a, b) => {
             const dateA = new Date(a.createdAt || 0);
             const dateB = new Date(b.createdAt || 0);
@@ -126,12 +123,11 @@ router.get('/products/:productId', async (req, res) => {
     }
 });
 
-// Submit a product for approval (authenticated)
+// Submit a product for approval
 router.post('/products/submit', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { name, category, originalPrice, discountPrice, description, unit, stock, image } = req.body;
     
-    // Validation
     if (!name || name.trim().length < 3) {
         return res.status(400).json({ error: 'Product name must be at least 3 characters' });
     }
@@ -161,7 +157,8 @@ router.post('/products/submit', authenticate, async (req, res) => {
         const discount = Math.round(((originalPrice - discountPrice) / originalPrice) * 100);
         
         const newProduct = {
-            userId,
+            userId: userId,
+            sellerId: userId, // ✅ ADDED: Explicitly set sellerId
             name: name.trim(),
             category: category,
             originalPrice: originalPrice,
@@ -181,7 +178,6 @@ router.post('/products/submit', authenticate, async (req, res) => {
         
         const docRef = await db.collection('marketplace_products').add(newProduct);
         
-        // Notify admins
         const adminsSnapshot = await db.collection('users')
             .where('role', '==', 'admin')
             .get();
@@ -207,9 +203,7 @@ router.post('/products/submit', authenticate, async (req, res) => {
     }
 });
 
-// src/routes/marketplace.js
-
-// Update product (authenticated - user's own product)
+// Update product
 router.put('/products/update/:productId', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { productId } = req.params;
@@ -225,20 +219,16 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
         
         const productData = productDoc.data();
         
-        // Check if user owns the product
         if (productData.userId !== userId) {
             return res.status(403).json({ error: 'You can only edit your own products' });
         }
         
-        // ✅ Allow editing if rejected OR pending
         if (productData.status === 'approved') {
             return res.status(400).json({ error: 'Cannot edit approved products. Please contact admin.' });
         }
         
-        // Calculate discount percentage
         const discount = Math.round(((originalPrice - discountPrice) / originalPrice) * 100);
         
-        // ✅ Update product and reset status to pending for re-approval
         await productRef.update({
             name: name.trim(),
             category: category,
@@ -250,13 +240,13 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
             description: description.trim(),
             unit: unit || 'unit',
             stock: stock || 0,
-            status: 'pending', // ✅ Reset to pending for re-approval
+            status: 'pending',
+            sellerId: userId, // ✅ ADDED: Preserve sellerId on update
             updatedAt: new Date().toISOString(),
             resubmittedAt: new Date().toISOString(),
-            rejectionReason: null // ✅ Clear rejection reason on resubmission
+            rejectionReason: null
         });
         
-        // ✅ Notify admins about resubmission
         const adminsSnapshot = await db.collection('users')
             .where('role', '==', 'admin')
             .get();
@@ -279,7 +269,6 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
         
         await Promise.all(notificationPromises);
         
-        // ✅ Log the resubmission
         await db.collection('productActivityLogs').add({
             productId: productId,
             userId: userId,
@@ -306,7 +295,7 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
     }
 });
 
-// Delete product (authenticated - user's own product)
+// Delete product
 router.delete('/products/delete/:productId', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { productId } = req.params;
@@ -334,7 +323,6 @@ router.delete('/products/delete/:productId', authenticate, async (req, res) => {
 
 // ============ ADMIN PRODUCT ROUTES ============
 
-// Admin: Get all pending products
 router.get('/admin/pending', authenticate, isAdmin, async (req, res) => {
     try {
         const snapshot = await db.collection('marketplace_products')
@@ -347,7 +335,6 @@ router.get('/admin/pending', authenticate, isAdmin, async (req, res) => {
             products.push({ id: doc.id, ...data });
         });
         
-        // Sort by createdAt (oldest first)
         products.sort((a, b) => {
             const dateA = new Date(a.createdAt || 0);
             const dateB = new Date(b.createdAt || 0);
@@ -361,10 +348,7 @@ router.get('/admin/pending', authenticate, isAdmin, async (req, res) => {
     }
 });
 
-// Admin: Approve a product
-// src/routes/marketplace.js
-
-// Admin: Approve a product - WITH AUTO-ADD TO STOCK
+// Admin: Approve a product with auto-add to stock
 router.post('/admin/approve/:productId', authenticate, isAdmin, async (req, res) => {
     const { productId } = req.params;
     
@@ -379,10 +363,8 @@ router.post('/admin/approve/:productId', authenticate, isAdmin, async (req, res)
         const product = productDoc.data();
         let stockPhotoAdded = false;
 
-        // ✅ AUTO-ADD: If product has an image, add it to stock photos
         if (product.image && product.image !== '📦') {
             try {
-                // Check if image already exists in stock (avoid duplicates)
                 const existingStock = await db.collection('stockPhotos')
                     .where('url', '==', product.image)
                     .get();
@@ -390,7 +372,7 @@ router.post('/admin/approve/:productId', authenticate, isAdmin, async (req, res)
                 if (existingStock.empty) {
                     const stockPhotoData = {
                         category: product.category || 'others',
-                        url: product.image, // ← Reuse the same Cloudinary URL!
+                        url: product.image,
                         fileName: `user_uploaded_${product.userId}_${Date.now()}`,
                         fileSize: 0,
                         fileType: 'image/jpeg',
@@ -410,7 +392,6 @@ router.post('/admin/approve/:productId', authenticate, isAdmin, async (req, res)
                     stockPhotoAdded = true;
                     console.log(`✅ Auto-added user image to stock: ${product.name}`);
                 } else {
-                    // Image already in stock, just update usage count
                     const existingDoc = existingStock.docs[0];
                     await existingDoc.ref.update({
                         usedCount: (existingDoc.data().usedCount || 0) + 1,
@@ -421,11 +402,9 @@ router.post('/admin/approve/:productId', authenticate, isAdmin, async (req, res)
                 }
             } catch (stockError) {
                 console.error('Error adding to stock:', stockError);
-                // Don't fail the approval if stock addition fails
             }
         }
         
-        // Update product status
         await productRef.update({
             status: 'approved',
             approvedAt: new Date().toISOString(),
@@ -433,7 +412,6 @@ router.post('/admin/approve/:productId', authenticate, isAdmin, async (req, res)
             stockPhotoAdded: stockPhotoAdded
         });
         
-        // Notify seller
         await createNotification(
             product.userId,
             '✅ Product Approved!',
@@ -502,7 +480,6 @@ router.post('/orders', authenticate, async (req, res) => {
     }
     
     try {
-        // 1. Get user
         const userDoc = await db.collection('users').doc(userId).get();
         if (!userDoc.exists) {
             return res.status(404).json({ error: 'User not found' });
@@ -510,7 +487,6 @@ router.post('/orders', authenticate, async (req, res) => {
         const userData = userDoc.data();
         const currentBalance = userData.currentBalance || 0;
         
-        // 2. Check balance
         if (total > currentBalance) {
             return res.status(400).json({ 
                 error: 'Insufficient balance',
@@ -520,7 +496,6 @@ router.post('/orders', authenticate, async (req, res) => {
             });
         }
         
-        // 3. Validate product stock
         for (const item of items) {
             const productDoc = await db.collection('marketplace_products').doc(item.id).get();
             if (!productDoc.exists) {
@@ -534,7 +509,6 @@ router.post('/orders', authenticate, async (req, res) => {
             }
         }
         
-        // 4. Create order
         const orderId = generateOrderId();
         const orderRef = db.collection('marketplace_orders').doc(orderId);
         
@@ -546,11 +520,14 @@ router.post('/orders', authenticate, async (req, res) => {
             { stage: 'Delivered', time: null, completed: false }
         ];
         
+        // ✅ FIX: Include sellerId in order
         const order = {
             orderId: orderId,
             userId: userId,
+            sellerId: items[0]?.sellerId || null, // Store sellerId from first item
             items: items.map(item => ({
                 productId: item.id,
+                sellerId: item.sellerId || null, // Store sellerId per item
                 name: item.name,
                 quantity: item.quantity,
                 price: item.discountPrice,
@@ -565,19 +542,18 @@ router.post('/orders', authenticate, async (req, res) => {
             deliveryAddress: deliveryAddress || userData.deliveryAddress || 'Not provided',
             status: 'pending',
             tracking: tracking,
+            rated: false,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
         
         await orderRef.set(order);
         
-        // 5. Deduct balance
         await db.collection('users').doc(userId).update({
             currentBalance: admin.firestore.FieldValue.increment(-total),
             updatedAt: new Date().toISOString()
         });
         
-        // 6. Create transaction record
         await db.collection('transactions').add({
             userId: userId,
             type: 'marketplace_purchase',
@@ -588,7 +564,6 @@ router.post('/orders', authenticate, async (req, res) => {
             createdAt: new Date().toISOString()
         });
         
-        // 7. Update product stock
         for (const item of items) {
             const productRef = db.collection('marketplace_products').doc(item.id);
             await productRef.update({
@@ -597,7 +572,6 @@ router.post('/orders', authenticate, async (req, res) => {
             });
         }
         
-        // 8. Send order confirmation notification
         await createNotification(
             userId,
             '📦 Order Placed Successfully!',
@@ -606,7 +580,6 @@ router.post('/orders', authenticate, async (req, res) => {
             { orderId: orderId, total: total }
         );
         
-        // 9. Notify admins
         const adminsSnapshot = await db.collection('users')
             .where('role', '==', 'admin')
             .get();
@@ -651,7 +624,6 @@ router.get('/orders', authenticate, async (req, res) => {
             orders.push({ id: doc.id, ...data });
         });
         
-        // Sort in memory by createdAt (newest first)
         orders.sort((a, b) => {
             const dateA = new Date(a.createdAt || 0);
             const dateB = new Date(b.createdAt || 0);
@@ -712,20 +684,17 @@ router.delete('/orders/:orderId', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Cannot cancel delivered order' });
         }
         
-        // Refund user
         await db.collection('users').doc(userId).update({
             currentBalance: admin.firestore.FieldValue.increment(order.total),
             updatedAt: new Date().toISOString()
         });
         
-        // Mark as cancelled
         await orderRef.update({
             status: 'cancelled',
             cancelledAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         });
         
-        // Restore stock
         for (const item of order.items) {
             const productRef = db.collection('marketplace_products').doc(item.productId);
             await productRef.update({
@@ -751,8 +720,6 @@ router.delete('/orders/:orderId', authenticate, async (req, res) => {
 
 // ============ ADMIN ORDER ROUTES ============
 
-// src/routes/marketplace.js
-
 // Admin: Update order status
 router.put('/orders/:orderId/status', authenticate, isAdmin, async (req, res) => {
     const { orderId } = req.params;
@@ -769,7 +736,6 @@ router.put('/orders/:orderId/status', authenticate, isAdmin, async (req, res) =>
         const order = orderDoc.data();
         const tracking = order.tracking || [];
         
-        // ✅ Map stage to tracking index
         const stageMap = {
             'processing': 1,
             'dispatched': 2,
@@ -783,8 +749,6 @@ router.put('/orders/:orderId/status', authenticate, isAdmin, async (req, res) =>
             tracking[index].time = new Date().toISOString();
         }
         
-        // ✅ UPDATE: Also mark all previous stages as completed
-        // This ensures if admin skips a stage, it still shows correctly
         if (index !== undefined) {
             for (let i = 1; i < index; i++) {
                 if (tracking[i] && !tracking[i].completed) {
@@ -794,14 +758,12 @@ router.put('/orders/:orderId/status', authenticate, isAdmin, async (req, res) =>
             }
         }
         
-        // ✅ FIX: Explicitly set the status field
         await orderRef.update({
             tracking: tracking,
-            status: stage,  // ← This is the key fix!
+            status: stage,
             updatedAt: new Date().toISOString()
         });
         
-        // Send notification to user
         const statusMessages = {
             'processing': '⚙️ Your order is being processed.',
             'dispatched': '📦 Your order has been dispatched.',
@@ -837,7 +799,6 @@ router.get('/admin/orders', authenticate, isAdmin, async (req, res) => {
             orders.push({ id: doc.id, ...data });
         });
         
-        // Sort by createdAt (newest first)
         orders.sort((a, b) => {
             const dateA = new Date(a.createdAt || 0);
             const dateB = new Date(b.createdAt || 0);
@@ -848,6 +809,374 @@ router.get('/admin/orders', authenticate, isAdmin, async (req, res) => {
     } catch (error) {
         console.error('Error fetching orders:', error);
         res.status(500).json({ error: 'Failed to fetch orders' });
+    }
+});
+
+// ============================================================
+// COMPLETE RATING SYSTEM
+// ============================================================
+
+// src/routes/marketplace.js
+// Add this after the admin order routes and before the rating system
+
+// ============================================================
+// SELLER RATING ENDPOINT
+// ============================================================
+
+// Get seller rating and stats
+router.get('/seller/:sellerId/rating', async (req, res) => {
+    const { sellerId } = req.params;
+    
+    try {
+        // Check if seller exists
+        const sellerDoc = await db.collection('users').doc(sellerId).get();
+        if (!sellerDoc.exists) {
+            return res.status(404).json({ error: 'Seller not found' });
+        }
+        
+        // Get all reviews for this seller
+        const reviewsSnapshot = await db.collection('sellerRatings')
+            .where('sellerId', '==', sellerId)
+            .get();
+        
+        const reviews = [];
+        let totalRating = 0;
+        reviewsSnapshot.forEach(doc => {
+            const data = doc.data();
+            reviews.push({ id: doc.id, ...data });
+            totalRating += data.rating || 0;
+        });
+        
+        const reviewCount = reviews.length;
+        const averageRating = reviewCount > 0 ? totalRating / reviewCount : 0;
+        
+        // Get seller's products count
+        const productsSnapshot = await db.collection('marketplace_products')
+            .where('sellerId', '==', sellerId)
+            .where('status', '==', 'approved')
+            .get();
+        
+        const productCount = productsSnapshot.size;
+        
+        // Get seller join date
+        const sellerData = sellerDoc.data();
+        const joinedDate = sellerData.joinDate || sellerData.createdAt || new Date().toISOString();
+        
+        // Calculate rating distribution
+        const distribution = {
+            5: 0, 4: 0, 3: 0, 2: 0, 1: 0
+        };
+        reviews.forEach(r => {
+            const rating = Math.round(r.rating || 0);
+            if (distribution[rating] !== undefined) {
+                distribution[rating]++;
+            }
+        });
+        
+        // Get recent reviews (last 5)
+        const recentReviews = reviews
+            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+            .slice(0, 5)
+            .map(r => ({
+                id: r.id,
+                rating: r.rating,
+                comment: r.comment,
+                reviewerName: r.reviewerName || 'Anonymous',
+                createdAt: r.createdAt,
+                productName: r.productName || ''
+            }));
+        
+        res.json({
+            success: true,
+            data: {
+                averageRating: parseFloat(averageRating.toFixed(1)),
+                totalReviews: reviewCount,
+                productCount: productCount,
+                joinedDate: joinedDate,
+                positivePercentage: reviewCount > 0 
+                    ? Math.round((reviews.filter(r => r.rating >= 4).length / reviewCount) * 100) 
+                    : 0,
+                distribution: distribution,
+                recentReviews: recentReviews,
+                sellerName: sellerData.fullName || 'Unknown Seller'
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error fetching seller rating:', error);
+        res.status(500).json({ error: 'Failed to fetch seller rating' });
+    }
+});
+
+// Submit rating for a product and seller
+router.post('/orders/:orderId/rate', authenticate, async (req, res) => {
+    const userId = req.user.uid;
+    const { orderId } = req.params;
+    const { ratings, sellerRating, sellerComment } = req.body;
+
+    try {
+        const orderRef = db.collection('marketplace_orders').doc(orderId);
+        const orderDoc = await orderRef.get();
+        
+        if (!orderDoc.exists) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+
+        const orderData = orderDoc.data();
+
+        if (orderData.userId !== userId) {
+            return res.status(403).json({ error: 'Unauthorized' });
+        }
+
+        if (orderData.status !== 'delivered') {
+            return res.status(400).json({ error: 'Can only rate delivered orders' });
+        }
+
+        if (orderData.rated) {
+            return res.status(400).json({ error: 'Order already rated' });
+        }
+
+        if (!ratings || !Array.isArray(ratings) || ratings.length === 0) {
+            return res.status(400).json({ error: 'Please rate at least one product' });
+        }
+
+        const userDoc = await db.collection('users').doc(userId).get();
+        const userData = userDoc.exists ? userDoc.data() : {};
+        const reviewerName = userData.fullName || userData.displayName || 'Anonymous';
+
+        const ratingPromises = [];
+        let sellerRatingTotal = 0;
+        let sellerRatingCount = 0;
+        let mainSellerId = orderData.sellerId || orderData.items[0]?.sellerId || orderData.userId;
+
+        for (const item of ratings) {
+            const orderItem = orderData.items.find(p => p.productId === item.productId);
+            if (!orderItem) {
+                return res.status(400).json({ error: `Product ${item.productId} not in this order` });
+            }
+
+            const sellerId = orderItem.sellerId || orderData.sellerId || orderData.userId;
+            
+            if (!mainSellerId) {
+                mainSellerId = sellerId;
+            }
+
+            const ratingValue = Math.round(item.rating);
+            
+            const productRatingData = {
+                productId: item.productId,
+                userId: userId,
+                orderId: orderId,
+                rating: ratingValue,
+                comment: item.comment || '',
+                reviewerName: reviewerName,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                sellerId: sellerId,
+                productName: orderItem.name || 'Unknown Product'
+            };
+
+            Object.keys(productRatingData).forEach(key => {
+                if (productRatingData[key] === undefined) {
+                    delete productRatingData[key];
+                }
+            });
+
+            const productRatingRef = db.collection('productRatings').doc();
+            ratingPromises.push(productRatingRef.set(productRatingData));
+
+            // ✅ UPDATE: Also update the product's rating distribution
+            const productRef = db.collection('marketplace_products').doc(item.productId);
+            const productDoc = await productRef.get();
+            if (productDoc.exists) {
+                const productData = productDoc.data();
+                
+                // ✅ Get current distribution or initialize
+                const distribution = productData.ratingDistribution || { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+                
+                // ✅ Increment the rating count for this star value
+                if (distribution[ratingValue] !== undefined) {
+                    distribution[ratingValue] = (distribution[ratingValue] || 0) + 1;
+                }
+                
+                const currentTotal = (productData.ratingTotal || 0) + ratingValue;
+                const currentCount = (productData.ratingCount || 0) + 1;
+                
+                await productRef.update({
+                    ratingTotal: currentTotal,
+                    ratingCount: currentCount,
+                    averageRating: currentTotal / currentCount,
+                    ratingDistribution: distribution, // ✅ Save distribution
+                    updatedAt: new Date().toISOString()
+                });
+            }
+
+            sellerRatingTotal += ratingValue;
+            sellerRatingCount++;
+        }
+
+        if (sellerRating && mainSellerId) {
+            const sellerRatingData = {
+                sellerId: mainSellerId,
+                userId: userId,
+                orderId: orderId,
+                rating: Math.round(sellerRating),
+                comment: sellerComment || '',
+                reviewerName: reviewerName,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
+
+            Object.keys(sellerRatingData).forEach(key => {
+                if (sellerRatingData[key] === undefined) {
+                    delete sellerRatingData[key];
+                }
+            });
+
+            const sellerRatingRef = db.collection('sellerRatings').doc();
+            ratingPromises.push(sellerRatingRef.set(sellerRatingData));
+
+            const sellerRef = db.collection('users').doc(mainSellerId);
+            const sellerDoc = await sellerRef.get();
+            if (sellerDoc.exists) {
+                const sellerData = sellerDoc.data();
+                const currentTotal = (sellerData.sellerRatingTotal || 0) + Math.round(sellerRating);
+                const currentCount = (sellerData.sellerRatingCount || 0) + 1;
+                await sellerRef.update({
+                    sellerRatingTotal: currentTotal,
+                    sellerRatingCount: currentCount,
+                    sellerAverageRating: currentTotal / currentCount,
+                    updatedAt: new Date().toISOString()
+                });
+            }
+        }
+
+        await Promise.all(ratingPromises);
+
+        const updateData = {
+            rated: true,
+            ratedAt: new Date().toISOString(),
+            ratingSummary: {
+                productCount: ratings.length,
+                averageRating: sellerRatingCount > 0 ? sellerRatingTotal / sellerRatingCount : 0
+            }
+        };
+
+        Object.keys(updateData).forEach(key => {
+            if (updateData[key] === undefined) {
+                delete updateData[key];
+            }
+        });
+
+        await orderRef.update(updateData);
+
+        if (mainSellerId) {
+            await createNotification(
+                mainSellerId,
+                '⭐ New Rating Received!',
+                `${reviewerName} rated your products: ${(sellerRatingTotal / sellerRatingCount).toFixed(1)} stars`,
+                'new_rating',
+                { orderId: orderId }
+            );
+        }
+
+        const avgRating = sellerRatingCount > 0 ? sellerRatingTotal / sellerRatingCount : 0;
+
+        res.json({
+            success: true,
+            message: 'Ratings submitted successfully!',
+            sellerAverage: avgRating
+        });
+
+    } catch (error) {
+        console.error('Error submitting ratings:', error);
+        res.status(500).json({ error: error.message || 'Failed to submit ratings' });
+    }
+});
+
+// Get order rating status
+router.get('/orders/:orderId/rating-status', authenticate, async (req, res) => {
+    const userId = req.user.uid;
+    const { orderId } = req.params;
+
+    try {
+        const orderRef = db.collection('marketplace_orders').doc(orderId);
+        const orderDoc = await orderRef.get();
+
+        if (!orderDoc.exists) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+
+        const orderData = orderDoc.data();
+
+        if (orderData.userId !== userId) {
+            return res.status(403).json({ error: 'Unauthorized' });
+        }
+
+        if (orderData.rated) {
+            return res.json({
+                success: true,
+                canRate: false,
+                alreadyRated: true,
+                ratedAt: orderData.ratedAt
+            });
+        }
+
+        const canRate = orderData.status === 'delivered';
+        const daysSinceDelivery = orderData.status === 'delivered' 
+            ? Math.floor((Date.now() - new Date(orderData.updatedAt).getTime()) / (1000 * 60 * 60 * 24))
+            : 0;
+
+        const isExpired = daysSinceDelivery > 30;
+
+        res.json({
+            success: true,
+            canRate: canRate && !isExpired && !orderData.rated,
+            alreadyRated: orderData.rated || false,
+            isExpired: isExpired,
+            daysSinceDelivery: daysSinceDelivery,
+            orderItems: orderData.items || [],
+            orderId: orderId
+        });
+
+    } catch (error) {
+        console.error('Error checking rating status:', error);
+        res.status(500).json({ error: 'Failed to check rating status' });
+    }
+});
+
+// Get product ratings
+router.get('/products/:productId/ratings', async (req, res) => {
+    const { productId } = req.params;
+    const { limit = 10 } = req.query;
+
+    try {
+        const ratingsSnapshot = await db.collection('productRatings')
+            .where('productId', '==', productId)
+            .orderBy('createdAt', 'desc')
+            .limit(parseInt(limit))
+            .get();
+
+        const ratings = [];
+        ratingsSnapshot.forEach(doc => {
+            ratings.push({ id: doc.id, ...doc.data() });
+        });
+
+        const productRef = db.collection('marketplace_products').doc(productId);
+        const productDoc = await productRef.get();
+        const productData = productDoc.data();
+
+        res.json({
+            success: true,
+            ratings: ratings,
+            averageRating: productData?.averageRating || 0,
+            totalRatings: productData?.ratingCount || 0,
+            ratingDistribution: productData?.ratingDistribution || { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }
+        });
+
+    } catch (error) {
+        console.error('Error fetching product ratings:', error);
+        res.status(500).json({ error: 'Failed to fetch ratings' });
     }
 });
 
