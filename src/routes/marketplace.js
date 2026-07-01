@@ -823,6 +823,8 @@ router.get('/admin/orders', authenticate, isAdmin, async (req, res) => {
 // SELLER RATING ENDPOINT
 // ============================================================
 
+// src/routes/marketplace.js
+
 // Get seller rating and stats
 router.get('/seller/:sellerId/rating', async (req, res) => {
     const { sellerId } = req.params;
@@ -833,6 +835,8 @@ router.get('/seller/:sellerId/rating', async (req, res) => {
         if (!sellerDoc.exists) {
             return res.status(404).json({ error: 'Seller not found' });
         }
+        
+        const sellerData = sellerDoc.data();
         
         // Get all reviews for this seller
         const reviewsSnapshot = await db.collection('sellerRatings')
@@ -858,9 +862,27 @@ router.get('/seller/:sellerId/rating', async (req, res) => {
         
         const productCount = productsSnapshot.size;
         
-        // Get seller join date
-        const sellerData = sellerDoc.data();
-        const joinedDate = sellerData.joinDate || sellerData.createdAt || new Date().toISOString();
+        // ✅ FIX: Convert Firestore timestamp to ISO string
+        let joinedDate = null;
+        if (sellerData.joinDate) {
+            // Check if it's a Firestore timestamp
+            if (sellerData.joinDate.toDate) {
+                joinedDate = sellerData.joinDate.toDate().toISOString();
+            } else if (typeof sellerData.joinDate === 'string') {
+                joinedDate = sellerData.joinDate;
+            } else {
+                joinedDate = new Date(sellerData.joinDate).toISOString();
+            }
+        } else if (sellerData.createdAt) {
+            // Fallback to createdAt if joinDate doesn't exist
+            if (sellerData.createdAt.toDate) {
+                joinedDate = sellerData.createdAt.toDate().toISOString();
+            } else if (typeof sellerData.createdAt === 'string') {
+                joinedDate = sellerData.createdAt;
+            } else {
+                joinedDate = new Date(sellerData.createdAt).toISOString();
+            }
+        }
         
         // Calculate rating distribution
         const distribution = {
