@@ -64,6 +64,7 @@ const flutterwaveRoutes = require('./routes/flutterwave');
 const investmentRoutes = require('./routes/thesparkprivateinvestment');
 const privateAccessRoutes = require('./routes/first_private_code');
 const marketplaceRoutes = require('./routes/marketplace');
+const addressRoutes = require('./routes/address');
 
 const app = express();
 
@@ -92,6 +93,8 @@ app.use('/api/flutterwave', flutterwaveRoutes);
 app.use('/api/investment', investmentRoutes);
 app.use('/api/private', privateAccessRoutes);
 app.use('/api/marketplace', marketplaceRoutes);
+app.use('/api/address', addressRoutes);
+
 
 app.use((err, req, res, next) => {
     console.error(err.stack);

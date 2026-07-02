@@ -473,7 +473,7 @@ router.post('/admin/reject/:productId', authenticate, isAdmin, async (req, res) 
 // Create order (checkout)
 router.post('/orders', authenticate, async (req, res) => {
     const userId = req.user.uid;
-    const { items, total, deliveryAddress } = req.body;
+    const { items, total, deliveryAddress, addressId  } = req.body;
     
     if (!items || items.length === 0) {
         return res.status(400).json({ error: 'Cart is empty' });
@@ -486,6 +486,18 @@ router.post('/orders', authenticate, async (req, res) => {
         }
         const userData = userDoc.data();
         const currentBalance = userData.currentBalance || 0;
+
+         let selectedAddress = null;
+        if (addressId) {
+            const addresses = userData.addresses || [];
+            selectedAddress = addresses.find(addr => addr.id === addressId);
+        }
+        
+        // If no addressId provided, try to find the default address
+        if (!selectedAddress) {
+            const addresses = userData.addresses || [];
+            selectedAddress = addresses.find(addr => addr.isDefault) || addresses[0] || null;
+        }
         
         if (total > currentBalance) {
             return res.status(400).json({ 
@@ -540,6 +552,11 @@ router.post('/orders', authenticate, async (req, res) => {
                 sum + ((item.originalPrice - item.discountPrice) * item.quantity), 0
             ),
             deliveryAddress: deliveryAddress || userData.deliveryAddress || 'Not provided',
+            deliveryPhone: selectedAddress?.phone || userData.phone || '', // ← SAVE PHONE
+            deliveryContact: selectedAddress?.fullName || userData.fullName || '', // ← SAVE CONTACT
+            deliveryCity: selectedAddress?.city || '',
+            deliveryState: selectedAddress?.state || '',
+            deliveryStreet: selectedAddress?.street || '',
             status: 'pending',
             tracking: tracking,
             rated: false,
@@ -815,15 +832,6 @@ router.get('/admin/orders', authenticate, isAdmin, async (req, res) => {
 // ============================================================
 // COMPLETE RATING SYSTEM
 // ============================================================
-
-// src/routes/marketplace.js
-// Add this after the admin order routes and before the rating system
-
-// ============================================================
-// SELLER RATING ENDPOINT
-// ============================================================
-
-// src/routes/marketplace.js
 
 // Get seller rating and stats
 router.get('/seller/:sellerId/rating', async (req, res) => {
