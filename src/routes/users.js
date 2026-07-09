@@ -95,29 +95,27 @@
 
 // module.exports = router;
 
-
 const express = require('express');
 const { db } = require('../services/firebase');
 const admin = require('firebase-admin');
 const { authenticate } = require('../middleware/auth');
-const REFERRAL_CONSTANTS = require('../utils/referralConstants');
+const REFERRAL_CONSTANTS = require('../utils/referralConstants.cjs');
 const { sendWelcomeEmail } = require('../services/emailService');
-
 
 const router = express.Router();
 
 // ============ REFERRAL PROCESSING ENDPOINT ============
-// ✅ Process referral code (server-side with transaction)
 router.post('/process-referral', authenticate, async (req, res) => {
     const { referralCode } = req.body;
     const userId = req.user.uid;
+    
+    console.log('🔍 Processing referral:', { userId, referralCode });
     
     if (!referralCode) {
         return res.json({ success: true, message: 'No referral code provided' });
     }
     
     try {
-        // 1. Get the user
         const userRef = db.collection('users').doc(userId);
         const userDoc = await userRef.get();
         
@@ -127,7 +125,6 @@ router.post('/process-referral', authenticate, async (req, res) => {
         
         const userData = userDoc.data();
         
-        // 2. Check if user already has a referrer
         if (userData.referredBy) {
             return res.json({ 
                 success: true, 
@@ -136,10 +133,9 @@ router.post('/process-referral', authenticate, async (req, res) => {
             });
         }
         
-        // 3. Find the referrer
+        // ✅ Admin SDK way: .where().get()
         const usersRef = db.collection('users');
-        const q = query(usersRef, where('referralCode', '==', referralCode));
-        const querySnapshot = await getDocs(q);
+        const querySnapshot = await usersRef.where('referralCode', '==', referralCode).get();
         
         if (querySnapshot.empty) {
             return res.status(400).json({ 
@@ -151,7 +147,6 @@ router.post('/process-referral', authenticate, async (req, res) => {
         const referrerDoc = querySnapshot.docs[0];
         const referrerId = referrerDoc.id;
         
-        // 4. Prevent self-referral
         if (referrerId === userId) {
             return res.status(400).json({ 
                 success: false, 
@@ -159,7 +154,6 @@ router.post('/process-referral', authenticate, async (req, res) => {
             });
         }
         
-        // 5. Check if referral record already exists
         const existingRefQuery = await db.collection('referrals')
             .where('referredId', '==', userId)
             .get();
@@ -172,25 +166,20 @@ router.post('/process-referral', authenticate, async (req, res) => {
             });
         }
         
-        // 6. Use a transaction to prevent race conditions
         await db.runTransaction(async (transaction) => {
-            // Get fresh data
             const freshUserDoc = await transaction.get(userRef);
             const freshUserData = freshUserDoc.data();
             
-            // Check again if already referred
             if (freshUserData.referredBy) {
                 return;
             }
             
-            // Update user with referrer
             transaction.update(userRef, {
                 referredBy: referrerId,
                 currentBalance: admin.firestore.FieldValue.increment(REFERRAL_CONSTANTS.NEW_USER_BONUS),
                 totalPrincipalSaved: admin.firestore.FieldValue.increment(REFERRAL_CONSTANTS.NEW_USER_BONUS)
             });
             
-            // Create referral record
             const referralRef = db.collection('referrals').doc();
             transaction.set(referralRef, {
                 referrerId: referrerId,
@@ -202,7 +191,6 @@ router.post('/process-referral', authenticate, async (req, res) => {
                 createdAt: admin.firestore.FieldValue.serverTimestamp()
             });
             
-            // Create transaction record for bonus
             const txRef = db.collection('transactions').doc();
             transaction.set(txRef, {
                 userId: userId,
@@ -214,6 +202,7 @@ router.post('/process-referral', authenticate, async (req, res) => {
             });
         });
         
+        console.log('✅ Referral processed successfully for user:', userId);
         res.json({ 
             success: true, 
             message: 'Referral processed successfully',
@@ -229,8 +218,109 @@ router.post('/process-referral', authenticate, async (req, res) => {
     }
 });
 
+// ============ RETRY REFERRAL ============
+router.post('/retry-referral', authenticate, async (req, res) => {
+    const { referralCode } = req.body;
+    const userId = req.user.uid;
+    
+    console.log('🔄 Retrying referral for user:', { userId, referralCode });
+    
+    if (!referralCode) {
+        return res.status(400).json({ error: 'Referral code required' });
+    }
+    
+    try {
+        const userRef = db.collection('users').doc(userId);
+        const userDoc = await userRef.get();
+        
+        if (!userDoc.exists) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        const userData = userDoc.data();
+        
+        if (userData.referredBy) {
+            return res.json({ 
+                success: true, 
+                message: 'User already has a referrer',
+                alreadyReferred: true 
+            });
+        }
+        
+        // ✅ Admin SDK way: .where().get()
+        const usersRef = db.collection('users');
+        const querySnapshot = await usersRef.where('referralCode', '==', referralCode).get();
+        
+        if (querySnapshot.empty) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Invalid referral code' 
+            });
+        }
+        
+        const referrerDoc = querySnapshot.docs[0];
+        const referrerId = referrerDoc.id;
+        
+        if (referrerId === userId) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'You cannot refer yourself' 
+            });
+        }
+        
+        await db.runTransaction(async (transaction) => {
+            const freshUserDoc = await transaction.get(userRef);
+            const freshUserData = freshUserDoc.data();
+            
+            if (freshUserData.referredBy) {
+                return;
+            }
+            
+            transaction.update(userRef, {
+                referredBy: referrerId,
+                currentBalance: admin.firestore.FieldValue.increment(REFERRAL_CONSTANTS.NEW_USER_BONUS),
+                totalPrincipalSaved: admin.firestore.FieldValue.increment(REFERRAL_CONSTANTS.NEW_USER_BONUS)
+            });
+            
+            const referralRef = db.collection('referrals').doc();
+            transaction.set(referralRef, {
+                referrerId: referrerId,
+                referredId: userId,
+                newUserBonus: REFERRAL_CONSTANTS.NEW_USER_BONUS,
+                referrerBonus: REFERRAL_CONSTANTS.REFERRER_BONUS,
+                newUserPaid: true,
+                referrerPaid: false,
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            
+            const txRef = db.collection('transactions').doc();
+            transaction.set(txRef, {
+                userId: userId,
+                type: REFERRAL_CONSTANTS.TRANSACTION_TYPES.NEW_USER,
+                amount: REFERRAL_CONSTANTS.NEW_USER_BONUS,
+                description: `${REFERRAL_CONSTANTS.DESCRIPTIONS.NEW_USER} from ${referrerDoc.data().fullName}`,
+                balanceAfter: (freshUserData.currentBalance || 0) + REFERRAL_CONSTANTS.NEW_USER_BONUS,
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+        });
+        
+        console.log('✅ Referral retry successful for user:', userId);
+        res.json({ 
+            success: true, 
+            message: 'Referral processed successfully',
+            bonus: REFERRAL_CONSTANTS.NEW_USER_BONUS
+        });
+        
+    } catch (error) {
+        console.error('Error retrying referral:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to process referral' 
+        });
+    }
+});
 
-// ============ SEND WELCOME EMAIL WITH TRACKING ============
+// ============ SEND WELCOME EMAIL ============
 router.post('/send-welcome-email', authenticate, async (req, res) => {
     const { email, fullName } = req.body;
     const userId = req.user.uid;
@@ -307,6 +397,75 @@ router.post('/send-welcome-email', authenticate, async (req, res) => {
             success: false, 
             error: 'Failed to send welcome email' 
         });
+    }
+});
+
+// ============ RETRY WELCOME EMAIL ============
+router.post('/retry-welcome-email', authenticate, async (req, res) => {
+    const userId = req.user.uid;
+    
+    console.log('📧 Retry welcome email request for userId:', userId);
+    
+    try {
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (!userDoc.exists) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        const user = userDoc.data();
+        
+        if (!user.email) {
+            return res.status(400).json({ error: 'User has no email address' });
+        }
+        
+        console.log('📧 Retrying welcome email for:', user.email);
+        
+        const result = await sendWelcomeEmail(
+            user.email,
+            user.fullName || 'Saver',
+            userId,
+            3
+        );
+        
+        await db.collection('users').doc(userId).update({
+            welcomeEmailSent: result.success,
+            welcomeEmailSentAt: result.success ? new Date().toISOString() : null,
+            welcomeEmailAttempts: (user.welcomeEmailAttempts || 0) + 1,
+            welcomeEmailError: result.success ? null : (result.error || null),
+            welcomeEmailMessageId: result.messageId || null,
+            welcomeEmailRetried: true,
+            welcomeEmailRetriedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        });
+        
+        await db.collection('emailLogs').add({
+            userId: userId,
+            email: user.email,
+            type: 'welcome_retry',
+            success: result.success,
+            messageId: result.messageId || null,
+            attempts: result.attempts || 1,
+            error: result.error || null,
+            sentAt: new Date().toISOString(),
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        if (result.success) {
+            console.log('✅ Welcome email retry successful for:', user.email);
+            res.json({ 
+                success: true, 
+                message: 'Welcome email sent successfully' 
+            });
+        } else {
+            console.error('❌ Welcome email retry failed for:', user.email, result.error);
+            res.status(500).json({ 
+                success: false, 
+                error: result.error || 'Failed to send welcome email' 
+            });
+        }
+    } catch (error) {
+        console.error('Error retrying welcome email:', error);
+        res.status(500).json({ error: 'Failed to send welcome email' });
     }
 });
 
@@ -554,7 +713,6 @@ router.post('/send-bulk-welcome-emails', authenticate, async (req, res) => {
 // ============ GET ALL USERS (Admin only) ============
 router.get('/admin/users', authenticate, async (req, res) => {
     try {
-        // Check if user is admin
         const adminDoc = await db.collection('users').doc(req.user.uid).get();
         if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
             return res.status(403).json({ error: 'Admin access required' });
@@ -591,10 +749,9 @@ router.get('/admin/users', authenticate, async (req, res) => {
     }
 });
 
-// ============ GET ALL USERS (Alternative route - if you prefer /users/all) ============
+// ============ GET ALL USERS (Alternative) ============
 router.get('/all', authenticate, async (req, res) => {
     try {
-        // Check if user is admin
         const adminDoc = await db.collection('users').doc(req.user.uid).get();
         if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
             return res.status(403).json({ error: 'Admin access required' });
@@ -630,6 +787,7 @@ router.get('/all', authenticate, async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch users' });
     }
 });
+
 // ============ GET USER PROFILE ============
 router.get('/me', authenticate, async (req, res) => {
     const userId = req.user.uid;
@@ -642,12 +800,10 @@ router.get('/me', authenticate, async (req, res) => {
     
     const user = userDoc.data();
     
-    // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
     const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
     
     let messageQuery;
     if (!hasStarted) {
-        // User is on Day 0 - get welcome message
         console.log(`📖 User ${userId} is on Day 0 - showing welcome message`);
         messageQuery = await db.collection('dailyMessages')
             .where('cycle', '==', 0)
@@ -655,7 +811,6 @@ router.get('/me', authenticate, async (req, res) => {
             .limit(1)
             .get();
     } else {
-        // User is on Day 1+ - get their current message
         console.log(`📖 User ${userId} is on Day ${user.currentDay}, Cycle ${user.currentCycle}`);
         messageQuery = await db.collection('dailyMessages')
             .where('cycle', '==', user.currentCycle)
@@ -676,6 +831,53 @@ router.get('/me', authenticate, async (req, res) => {
         userId: userDoc.id,
         todayMessage
     });
+});
+
+// ============================================================
+// ✅ GET USER BY ID
+// ============================================================
+router.get('/:userId', authenticate, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        const requesterDoc = await db.collection('users').doc(req.user.uid).get();
+        if (!requesterDoc.exists) {
+            return res.status(403).json({ error: 'Unauthorized - User not found' });
+        }
+        
+        const requesterData = requesterDoc.data();
+        const allowedRoles = ['admin', 'agent'];
+        
+        if (req.user.uid !== userId && !allowedRoles.includes(requesterData.role)) {
+            return res.status(403).json({ error: 'Unauthorized - Insufficient permissions' });
+        }
+        
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (!userDoc.exists) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        const userData = userDoc.data();
+        
+        res.json({
+            id: userDoc.id,
+            fullName: userData.fullName || userData.name || 'User',
+            email: userData.email || '',
+            phone: userData.phone || '',
+            role: userData.role || 'user',
+            currentBalance: userData.currentBalance || 0,
+            bvn: userData.bvn || null,
+            createdAt: userData.createdAt || null,
+            joinDate: userData.joinDate || userData.createdAt || null,
+            isActive: userData.isActive !== undefined ? userData.isActive : true,
+            referralCode: userData.referralCode || null,
+            referredBy: userData.referredBy || null
+        });
+        
+    } catch (error) {
+        console.error('❌ Error fetching user:', error);
+        res.status(500).json({ error: 'Failed to fetch user: ' + error.message });
+    }
 });
 
 // ============ GET TRANSACTIONS ============

@@ -65,6 +65,7 @@ const investmentRoutes = require('./routes/thesparkprivateinvestment');
 const privateAccessRoutes = require('./routes/first_private_code');
 const marketplaceRoutes = require('./routes/marketplace');
 const addressRoutes = require('./routes/address');
+const aiRoutes = require('./routes/ai');
 
 const app = express();
 
@@ -94,6 +95,7 @@ app.use('/api/investment', investmentRoutes);
 app.use('/api/private', privateAccessRoutes);
 app.use('/api/marketplace', marketplaceRoutes);
 app.use('/api/address', addressRoutes);
+app.use('/api/ai', aiRoutes);
 
 
 app.use((err, req, res, next) => {
