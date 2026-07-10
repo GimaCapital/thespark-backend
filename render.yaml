@@ -64,10 +64,7 @@ services:
     name: thespark-api
     runtime: node
     plan: free
-    buildCommand: |
-      npm install
-      mkdir -p frontend
-      cp -r ../thespark-frontend/src frontend/
+    buildCommand: npm run build
     startCommand: npm start
     autoDeploy: true
     envVars:

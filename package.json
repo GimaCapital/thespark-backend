@@ -1,8 +1,9 @@
-{
+﻿{
   "name": "thespark-backend",
   "version": "1.0.0",
   "main": "src/server.js",
   "scripts": {
+    "build": "mkdir -p frontend && git clone https://github.com/GimaCapital/thespark-frontend.git temp-frontend && cp -r temp-frontend/src frontend/ && rm -rf temp-frontend",
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "cron": "node src/cron/dailyBalanceUpdate.js",
