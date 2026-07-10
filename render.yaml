@@ -59,7 +59,6 @@
 #         sync: false
 #       - key: APP_URL
 #         sync: false
-
 services:
   - type: web
     name: thespark-api

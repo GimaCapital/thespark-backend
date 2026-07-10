@@ -174,18 +174,22 @@ class KnowledgeBase {
 
 
 async readFrontendCode() {
-    const sources = [];
+     const sources = [];
     try {
         const fs = require('fs');
         const path = require('path');
         
-        // let srcDir = path.join(__dirname, '../../../thespark-frontend/src');
-        let srcDir = path.join(__dirname, '../frontend/src');
+        // ✅ Check both possible locations
+        let srcDir = path.join(__dirname, '../../../thespark-frontend/src');
+        let altDir = path.join(__dirname, '../../frontend/src');
         
-        console.log('📂 Looking for frontend at:', srcDir);
-        
-        if (!fs.existsSync(srcDir)) {
-            console.log('❌ Frontend src directory not found:', srcDir);
+        if (fs.existsSync(srcDir)) {
+            console.log('✅ Found frontend at:', srcDir);
+        } else if (fs.existsSync(altDir)) {
+            console.log('✅ Found frontend at:', altDir);
+            srcDir = altDir;
+        } else {
+            console.log('❌ Frontend src directory not found');
             return sources;
         }
         
