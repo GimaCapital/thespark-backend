@@ -833,52 +833,7 @@ router.get('/me', authenticate, async (req, res) => {
     });
 });
 
-// ============================================================
-// ✅ GET USER BY ID
-// ============================================================
-router.get('/:userId', authenticate, async (req, res) => {
-    try {
-        const { userId } = req.params;
-        
-        const requesterDoc = await db.collection('users').doc(req.user.uid).get();
-        if (!requesterDoc.exists) {
-            return res.status(403).json({ error: 'Unauthorized - User not found' });
-        }
-        
-        const requesterData = requesterDoc.data();
-        const allowedRoles = ['admin', 'agent'];
-        
-        if (req.user.uid !== userId && !allowedRoles.includes(requesterData.role)) {
-            return res.status(403).json({ error: 'Unauthorized - Insufficient permissions' });
-        }
-        
-        const userDoc = await db.collection('users').doc(userId).get();
-        if (!userDoc.exists) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-        
-        const userData = userDoc.data();
-        
-        res.json({
-            id: userDoc.id,
-            fullName: userData.fullName || userData.name || 'User',
-            email: userData.email || '',
-            phone: userData.phone || '',
-            role: userData.role || 'user',
-            currentBalance: userData.currentBalance || 0,
-            bvn: userData.bvn || null,
-            createdAt: userData.createdAt || null,
-            joinDate: userData.joinDate || userData.createdAt || null,
-            isActive: userData.isActive !== undefined ? userData.isActive : true,
-            referralCode: userData.referralCode || null,
-            referredBy: userData.referredBy || null
-        });
-        
-    } catch (error) {
-        console.error('❌ Error fetching user:', error);
-        res.status(500).json({ error: 'Failed to fetch user: ' + error.message });
-    }
-});
+
 
 // ============ GET TRANSACTIONS ============
 router.get('/transactions', authenticate, async (req, res) => {
@@ -1132,6 +1087,53 @@ router.get('/bvn-status', authenticate, async (req, res) => {
             success: false, 
             error: 'Failed to get BVN status' 
         });
+    }
+});
+
+// ============================================================
+// ✅ GET USER BY ID
+// ============================================================
+router.get('/:userId', authenticate, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        const requesterDoc = await db.collection('users').doc(req.user.uid).get();
+        if (!requesterDoc.exists) {
+            return res.status(403).json({ error: 'Unauthorized - User not found' });
+        }
+        
+        const requesterData = requesterDoc.data();
+        const allowedRoles = ['admin', 'agent'];
+        
+        if (req.user.uid !== userId && !allowedRoles.includes(requesterData.role)) {
+            return res.status(403).json({ error: 'Unauthorized - Insufficient permissions' });
+        }
+        
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (!userDoc.exists) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        const userData = userDoc.data();
+        
+        res.json({
+            id: userDoc.id,
+            fullName: userData.fullName || userData.name || 'User',
+            email: userData.email || '',
+            phone: userData.phone || '',
+            role: userData.role || 'user',
+            currentBalance: userData.currentBalance || 0,
+            bvn: userData.bvn || null,
+            createdAt: userData.createdAt || null,
+            joinDate: userData.joinDate || userData.createdAt || null,
+            isActive: userData.isActive !== undefined ? userData.isActive : true,
+            referralCode: userData.referralCode || null,
+            referredBy: userData.referredBy || null
+        });
+        
+    } catch (error) {
+        console.error('❌ Error fetching user:', error);
+        res.status(500).json({ error: 'Failed to fetch user: ' + error.message });
     }
 });
 
