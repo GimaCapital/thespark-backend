@@ -1,72 +1,11 @@
-# services:
-#   - type: web
-#     name: thespark-api
-#     runtime: node
-#     plan: free
-#     buildCommand: npm install
-#     startCommand: npm start
-#     autoDeploy: true  # ✅ ADDED - Auto-deploys on push
-#     envVars:
-#       - key: FIREBASE_PROJECT_ID
-#         sync: false
-#       - key: FIREBASE_CLIENT_EMAIL
-#         sync: false
-#       - key: FIREBASE_PRIVATE_KEY
-#         sync: false
-#       - key: ADMIN_UID
-#         sync: false
-#       - key: CORS_ORIGIN
-#         sync: false
-#       - key: FLW_SECRET_KEY
-#         sync: false
-#       - key: FLW_PUBLIC_KEY
-#         sync: false
-#       - key: FLW_SECRET_HASH
-#         sync: false
-#       - key: FLW_CLIENT_ID
-#         sync: false
-#       - key: FLW_CLIENT_SECRET
-#         sync: false
-
-#   - type: cron
-#     name: thespark-cron
-#     runtime: node
-#     buildCommand: npm install
-#     startCommand: npm run cron
-#     schedule: "0 0 * * *"
-#     autoDeploy: true  # ✅ ADDED - Auto-deploys on push
-#     envVars:
-#       - key: FIREBASE_PROJECT_ID
-#         sync: false
-#       - key: FIREBASE_CLIENT_EMAIL
-#         sync: false
-#       - key: FIREBASE_PRIVATE_KEY
-#         sync: false
-
-#   - type: cron
-#     name: thespark-daily-messages
-#     runtime: node
-#     buildCommand: npm install
-#     startCommand: npm run cron-messages
-#     schedule: "0 6 * * *"
-#     autoDeploy: true  # ✅ ADDED - Auto-deploys on push
-#     envVars:
-#       - key: FIREBASE_PROJECT_ID
-#         sync: false
-#       - key: FIREBASE_CLIENT_EMAIL
-#         sync: false
-#       - key: FIREBASE_PRIVATE_KEY
-#         sync: false
-#       - key: APP_URL
-#         sync: false
 services:
   - type: web
     name: thespark-api
     runtime: node
     plan: free
-    buildCommand: npm run build
+    buildCommand: npm install
     startCommand: npm start
-    autoDeploy: true
+    autoDeploy: true  # ✅ ADDED - Auto-deploys on push
     envVars:
       - key: FIREBASE_PROJECT_ID
         sync: false
@@ -84,7 +23,7 @@ services:
         sync: false
       - key: FLW_SECRET_HASH
         sync: false
-      - key: FLW_CLIENT_KEY
+      - key: FLW_CLIENT_ID
         sync: false
       - key: FLW_CLIENT_SECRET
         sync: false
@@ -95,7 +34,7 @@ services:
     buildCommand: npm install
     startCommand: npm run cron
     schedule: "0 0 * * *"
-    autoDeploy: true
+    autoDeploy: true  # ✅ ADDED - Auto-deploys on push
     envVars:
       - key: FIREBASE_PROJECT_ID
         sync: false
@@ -110,7 +49,7 @@ services:
     buildCommand: npm install
     startCommand: npm run cron-messages
     schedule: "0 6 * * *"
-    autoDeploy: true
+    autoDeploy: true  # ✅ ADDED - Auto-deploys on push
     envVars:
       - key: FIREBASE_PROJECT_ID
         sync: false
