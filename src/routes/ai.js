@@ -39,31 +39,6 @@ router.post('/chat', authenticate, async (req, res) => {
     }
 });
 
-// Get session history
-// router.get('/history/:sessionId', authenticate, async (req, res) => {
-//     const { sessionId } = req.params;
-//     const userId = req.user.uid;
-    
-//     try {
-//         const snapshot = await db.collection('supportInteractions')
-//             .where('userId', '==', userId)
-//             .where('session', '==', sessionId)
-//             .orderBy('createdAt', 'asc')
-//             .get();
-        
-//         const history = [];
-//         snapshot.forEach(doc => {
-//             history.push({ id: doc.id, ...doc.data() });
-//         });
-        
-//         res.json(history);
-        
-//     } catch (error) {
-//         console.error('Error fetching history:', error);
-//         res.status(500).json({ error: 'Failed to fetch history' });
-//     }
-// });
-
 
 // Get session history - QUERY BY USER ID ONLY (Industry Standard)
 router.get('/history/:sessionId', authenticate, async (req, res) => {
@@ -295,6 +270,7 @@ router.post('/handoff', authenticate, async (req, res) => {
                     handoffId: handoffRef.id
                 },
                 read: false,
+            status: 'sent',
                 createdAt: new Date().toISOString()
             });
             
@@ -310,6 +286,7 @@ router.post('/handoff', authenticate, async (req, res) => {
                     handoffId: handoffRef.id
                 },
                 read: false,
+            status: 'sent',
                 createdAt: new Date().toISOString()
             });
             
@@ -326,6 +303,7 @@ router.post('/handoff', authenticate, async (req, res) => {
                     type: 'support_handoff',
                     data: { userId, sessionId, handoffId: handoffRef.id },
                     read: false,
+            status: 'sent',
                     createdAt: new Date().toISOString()
                 });
             });
@@ -356,6 +334,7 @@ router.post('/handoff', authenticate, async (req, res) => {
                     type: 'agent_needed',
                     data: { userId, sessionId, handoffId: handoffRef.id },
                     read: false,
+            status: 'sent',
                     createdAt: new Date().toISOString()
                 });
             });
@@ -545,82 +524,6 @@ router.get('/handoffs/pending', authenticate, async (req, res) => {
     }
 });
 
-// Agent claims a handoff (creates chat session)
-// // Agent claims a handoff (creates chat session)
-// router.put('/handoffs/:handoffId/claim-agent', authenticate, async (req, res) => {
-//     try {
-//         const userDoc = await db.collection('users').doc(req.user.uid).get();
-//         if (!userDoc.exists) {
-//             return res.status(403).json({ error: 'Unauthorized' });
-//         }
-//         const userData = userDoc.data();
-//         if (userData.role !== 'admin' && userData.role !== 'agent') {
-//             return res.status(403).json({ error: 'Unauthorized' });
-//         }
-
-//         const handoffId = req.params.handoffId;
-//         const handoffDoc = await db.collection('handoffRequests').doc(handoffId).get();
-        
-//         if (!handoffDoc.exists) {
-//             return res.status(404).json({ error: 'Handoff request not found' });
-//         }
-
-//         const handoffData = handoffDoc.data();
-
-//         // ✅ Create chat session
-//         const chatSession = {
-//             handoffId: handoffId,
-//             userId: handoffData.userId,
-//             agentId: req.user.uid,
-//             agentName: userData.fullName || 'Agent',
-//             status: 'active',
-//             messages: [],
-//             createdAt: new Date().toISOString(),
-//             updatedAt: new Date().toISOString()
-//         };
-
-//         const chatRef = await db.collection('chatSessions').add(chatSession);
-//         const chatId = chatRef.id;
-
-//         // ✅ Update handoff with chat session ID
-//         await db.collection('handoffRequests').doc(handoffId).update({
-//             status: 'claimed',
-//             claimedBy: req.user.uid,
-//             claimedByEmail: userData.email || 'Agent',
-//             claimedAt: new Date().toISOString(),
-//             chatSessionId: chatId  // ✅ Store the chat session ID
-//         });
-
-//         // Notify the user
-//         await db.collection('notifications').add({
-//             userId: handoffData.userId,
-//             title: '👤 Agent Connected',
-//             message: `${userData.fullName || 'An agent'} has joined the chat.`,
-//             type: 'agent_connected',
-//             data: { sessionId: chatId, agentName: userData.fullName || 'Agent' },
-//             read: false,
-//             createdAt: new Date().toISOString()
-//         });
-
-//         res.json({
-//             success: true,
-//             sessionId: chatId,
-//             agentName: userData.fullName || 'Agent',
-//             message: 'Handoff claimed. Chat session started.'
-//         });
-        
-//     } catch (error) {
-//         console.error('Error claiming handoff:', error);
-//         res.status(500).json({ error: 'Failed to claim handoff' });
-//     }
-// });
-
-
-// src/routes/ai.js - Updated claim-agent endpoint with AI history
-
-// src/routes/ai.js - Updated claim-agent endpoint
-
-// src/routes/ai.js - Complete updated claim-agent endpoint
 
 // Agent claims a handoff (creates chat session) - WITH AI HISTORY
 router.put('/handoffs/:handoffId/claim-agent', authenticate, async (req, res) => {
@@ -887,6 +790,7 @@ router.put('/handoffs/:handoffId/claim-agent', authenticate, async (req, res) =>
             type: 'agent_connected',
             data: { sessionId: chatId, agentName: userData.fullName || 'Agent' },
             read: false,
+            status: 'sent',
             createdAt: new Date().toISOString()
         });
 
@@ -988,6 +892,7 @@ router.post('/chat/:sessionId/message', authenticate, async (req, res) => {
                 type: 'chat_message',
                 data: { sessionId, messageId: newMessage.id },
                 read: false,
+            status: 'sent',
                 createdAt: new Date().toISOString()
             });
         }
@@ -1075,62 +980,6 @@ router.get('/sessions/active', authenticate, async (req, res) => {
     }
 });
 
-// Resolve/end chat session
-// router.put('/chat/:sessionId/resolve', authenticate, async (req, res) => {
-//     const { sessionId } = req.params;
-//     const userId = req.user.uid;
-
-//     try {
-//         const sessionDoc = await db.collection('chatSessions').doc(sessionId).get();
-//         if (!sessionDoc.exists) {
-//             return res.status(404).json({ error: 'Chat session not found' });
-//         }
-
-//         const sessionData = sessionDoc.data();
-        
-//         if (sessionData.agentId !== userId) {
-//             const userDoc = await db.collection('users').doc(userId).get();
-//             if (!userDoc.exists || userDoc.data().role !== 'admin') {
-//                 return res.status(403).json({ error: 'Unauthorized' });
-//             }
-//         }
-
-//         await db.collection('chatSessions').doc(sessionId).update({
-//             status: 'resolved',
-//             resolvedAt: new Date().toISOString(),
-//             resolvedBy: userId
-//         });
-
-//         const handoffSnapshot = await db.collection('handoffRequests')
-//             .where('session', '==', sessionId)
-//             .get();
-        
-//         handoffSnapshot.forEach(doc => {
-//             db.collection('handoffRequests').doc(doc.id).update({
-//                 status: 'resolved',
-//                 resolvedAt: new Date().toISOString(),
-//                 resolvedBy: userId
-//             });
-//         });
-
-//         await db.collection('notifications').add({
-//             userId: sessionData.userId,
-//             title: '✅ Chat Resolved',
-//             message: 'Your chat session has been resolved. Thank you for contacting us!',
-//             type: 'chat_resolved',
-//             data: { sessionId },
-//             read: false,
-//             createdAt: new Date().toISOString()
-//         });
-
-//         res.json({ success: true, message: 'Chat resolved' });
-//     } catch (error) {
-//         console.error('Error resolving chat:', error);
-//         res.status(500).json({ error: 'Failed to resolve chat' });
-//     }
-// });
-
-// src/routes/ai.js - Updated resolve endpoint
 
 router.put('/chat/:sessionId/resolve', authenticate, async (req, res) => {
     const { sessionId } = req.params;
@@ -1198,6 +1047,7 @@ router.put('/chat/:sessionId/resolve', authenticate, async (req, res) => {
             type: 'chat_resolved',
             data: { sessionId },
             read: false,
+            status: 'sent',
             createdAt: new Date().toISOString()
         });
 

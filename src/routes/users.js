@@ -789,6 +789,51 @@ router.get('/all', authenticate, async (req, res) => {
 });
 
 // ============ GET USER PROFILE ============
+// router.get('/me', authenticate, async (req, res) => {
+//     const userId = req.user.uid;
+    
+//     const userDoc = await db.collection('users').doc(userId).get();
+    
+//     if (!userDoc.exists) {
+//         return res.status(404).json({ error: 'User not found' });
+//     }
+    
+//     const user = userDoc.data();
+    
+//     const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
+    
+//     let messageQuery;
+//     if (!hasStarted) {
+//         console.log(`📖 User ${userId} is on Day 0 - showing welcome message`);
+//         messageQuery = await db.collection('dailyMessages')
+//             .where('cycle', '==', 0)
+//             .where('day', '==', 0)
+//             .limit(1)
+//             .get();
+//     } else {
+//         console.log(`📖 User ${userId} is on Day ${user.currentDay}, Cycle ${user.currentCycle}`);
+//         messageQuery = await db.collection('dailyMessages')
+//             .where('cycle', '==', user.currentCycle)
+//             .where('day', '==', user.currentDay)
+//             .limit(1)
+//             .get();
+//     }
+    
+//     let todayMessage = null;
+//     if (!messageQuery.empty) {
+//         todayMessage = messageQuery.docs[0].data();
+//     } else {
+//         console.log(`⚠️ No message found for Day ${user.currentDay}, Cycle ${user.currentCycle}`);
+//     }
+    
+//     res.json({
+//         ...user,
+//         userId: userDoc.id,
+//         todayMessage
+//     });
+// });
+
+// ============ GET USER PROFILE ============
 router.get('/me', authenticate, async (req, res) => {
     const userId = req.user.uid;
     
@@ -802,6 +847,9 @@ router.get('/me', authenticate, async (req, res) => {
     
     const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
     
+    // ✅ Calculate global day (matches your database)
+    const globalDay = (user.currentCycle - 1) * 21 + user.currentDay;
+    
     let messageQuery;
     if (!hasStarted) {
         console.log(`📖 User ${userId} is on Day 0 - showing welcome message`);
@@ -811,10 +859,10 @@ router.get('/me', authenticate, async (req, res) => {
             .limit(1)
             .get();
     } else {
-        console.log(`📖 User ${userId} is on Day ${user.currentDay}, Cycle ${user.currentCycle}`);
+        console.log(`📖 User ${userId} is on Day ${globalDay} (Cycle ${user.currentCycle}, Day ${user.currentDay})`);
+        // ✅ Use globalDay to find the message (matches your database)
         messageQuery = await db.collection('dailyMessages')
-            .where('cycle', '==', user.currentCycle)
-            .where('day', '==', user.currentDay)
+            .where('day', '==', globalDay)
             .limit(1)
             .get();
     }
@@ -823,13 +871,14 @@ router.get('/me', authenticate, async (req, res) => {
     if (!messageQuery.empty) {
         todayMessage = messageQuery.docs[0].data();
     } else {
-        console.log(`⚠️ No message found for Day ${user.currentDay}, Cycle ${user.currentCycle}`);
+        console.log(`⚠️ No message found for Day ${globalDay}`);
     }
     
     res.json({
         ...user,
         userId: userDoc.id,
-        todayMessage
+        todayMessage,
+        globalDay // ✅ Send to frontend
     });
 });
 

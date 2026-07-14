@@ -13,7 +13,7 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-const USER_ID = '7vP7uDPKJNVuplVJR3LFde9INbi1';
+const USER_ID = 'WBIWDEhvxMhosPM3TKCp7qVmAq13'; // Replace with the user ID you want to delete
 
 async function deleteUser() {
     console.log(`🗑️ Deleting user: ${USER_ID}`);
