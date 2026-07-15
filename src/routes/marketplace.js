@@ -203,7 +203,99 @@ router.post('/products/submit', authenticate, async (req, res) => {
     }
 });
 
-// Update product
+// // Update product
+// router.put('/products/update/:productId', authenticate, async (req, res) => {
+//     const userId = req.user.uid;
+//     const { productId } = req.params;
+//     const { name, category, originalPrice, discountPrice, description, unit, stock, image, imageSource } = req.body;
+    
+//     try {
+//         const productRef = db.collection('marketplace_products').doc(productId);
+//         const productDoc = await productRef.get();
+        
+//         if (!productDoc.exists) {
+//             return res.status(404).json({ error: 'Product not found' });
+//         }
+        
+//         const productData = productDoc.data();
+        
+//         if (productData.userId !== userId) {
+//             return res.status(403).json({ error: 'You can only edit your own products' });
+//         }
+        
+//         if (productData.status === 'approved') {
+//             return res.status(400).json({ error: 'Cannot edit approved products. Please contact admin.' });
+//         }
+        
+//         const discount = Math.round(((originalPrice - discountPrice) / originalPrice) * 100);
+        
+//         await productRef.update({
+//             name: name.trim(),
+//             category: category,
+//             originalPrice: originalPrice,
+//             discountPrice: discountPrice,
+//             discount: discount,
+//             image: image || '📦',
+//             imageSource: imageSource || null,
+//             description: description.trim(),
+//             unit: unit || 'unit',
+//             stock: stock || 0,
+//             status: 'pending',
+//             sellerId: userId, // ✅ ADDED: Preserve sellerId on update
+//             updatedAt: new Date().toISOString(),
+//             resubmittedAt: new Date().toISOString(),
+//             rejectionReason: null
+//         });
+        
+//         const adminsSnapshot = await db.collection('users')
+//             .where('role', '==', 'admin')
+//             .get();
+        
+//         const notificationPromises = [];
+//         adminsSnapshot.forEach(async (adminDoc) => {
+//             const promise = createNotification(
+//                 adminDoc.id,
+//                 '🔄 Product Resubmitted',
+//                 `${productData.sellerName || 'A user'} resubmitted "${name}" for approval after ${productData.status === 'rejected' ? 'rejection' : 'update'}`,
+//                 'product_resubmitted',
+//                 { 
+//                     productId: productId,
+//                     previousStatus: productData.status,
+//                     sellerId: userId
+//                 }
+//             );
+//             notificationPromises.push(promise);
+//         });
+        
+//         await Promise.all(notificationPromises);
+        
+//         await db.collection('productActivityLogs').add({
+//             productId: productId,
+//             userId: userId,
+//             action: 'resubmitted',
+//             previousStatus: productData.status,
+//             newStatus: 'pending',
+//             timestamp: new Date().toISOString(),
+//             details: {
+//                 name: name.trim(),
+//                 category: category,
+//                 originalPrice: originalPrice,
+//                 discountPrice: discountPrice
+//             }
+//         });
+        
+//         res.json({ 
+//             success: true, 
+//             message: 'Product updated and resubmitted for approval',
+//             status: 'pending'
+//         });
+//     } catch (error) {
+//         console.error('Error updating product:', error);
+//         res.status(500).json({ error: 'Failed to update product' });
+//     }
+// });
+
+// Update product - ✅ Allow editing approved products
 router.put('/products/update/:productId', authenticate, async (req, res) => {
     const userId = req.user.uid;
     const { productId } = req.params;
@@ -219,15 +311,19 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
         
         const productData = productDoc.data();
         
-        if (productData.userId !== userId) {
+        if (productData.userId !== userId && productData.sellerId !== userId) {
             return res.status(403).json({ error: 'You can only edit your own products' });
         }
         
-        if (productData.status === 'approved') {
-            return res.status(400).json({ error: 'Cannot edit approved products. Please contact admin.' });
-        }
+        // ✅ REMOVED: The restriction that blocked editing approved products
+        // if (productData.status === 'approved') {
+        //     return res.status(400).json({ error: 'Cannot edit approved products. Please contact admin.' });
+        // }
         
         const discount = Math.round(((originalPrice - discountPrice) / originalPrice) * 100);
+        
+        // ✅ If approved, set status to pending for review
+        const newStatus = productData.status === 'approved' ? 'pending' : productData.status;
         
         await productRef.update({
             name: name.trim(),
@@ -240,11 +336,14 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
             description: description.trim(),
             unit: unit || 'unit',
             stock: stock || 0,
-            status: 'pending',
-            sellerId: userId, // ✅ ADDED: Preserve sellerId on update
+            status: newStatus, // ✅ Use newStatus
+            sellerId: userId,
             updatedAt: new Date().toISOString(),
             resubmittedAt: new Date().toISOString(),
-            rejectionReason: null
+            rejectionReason: null,
+            ...(productData.status === 'approved' && {
+                previousStatus: 'approved'
+            })
         });
         
         const adminsSnapshot = await db.collection('users')
@@ -256,11 +355,12 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
             const promise = createNotification(
                 adminDoc.id,
                 '🔄 Product Resubmitted',
-                `${productData.sellerName || 'A user'} resubmitted "${name}" for approval after ${productData.status === 'rejected' ? 'rejection' : 'update'}`,
+                `${productData.sellerName || 'A user'} resubmitted "${name}" for approval`,
                 'product_resubmitted',
                 { 
                     productId: productId,
                     previousStatus: productData.status,
+                    newStatus: newStatus,
                     sellerId: userId
                 }
             );
@@ -274,7 +374,7 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
             userId: userId,
             action: 'resubmitted',
             previousStatus: productData.status,
-            newStatus: 'pending',
+            newStatus: newStatus,
             timestamp: new Date().toISOString(),
             details: {
                 name: name.trim(),
@@ -286,8 +386,10 @@ router.put('/products/update/:productId', authenticate, async (req, res) => {
         
         res.json({ 
             success: true, 
-            message: 'Product updated and resubmitted for approval',
-            status: 'pending'
+            message: productData.status === 'approved' 
+                ? 'Product updated and sent for review' 
+                : 'Product updated successfully',
+            status: newStatus
         });
     } catch (error) {
         console.error('Error updating product:', error);
