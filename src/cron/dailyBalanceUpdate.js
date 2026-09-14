@@ -152,10 +152,10 @@
 //     });
 
 
-
+// thespark-backend/src/cron/dailyBalanceUpdate.js
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
-const REFERRAL_CONSTANTS = require('../utils/referralConstants');
+const REFERRAL_CONSTANTS = require('../utils/referralConstants.cjs');
 
 dotenv.config();
 
@@ -184,13 +184,40 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-async function calculateAndPayInterest(userId, cycle, avgDays1to16, totalSavedDays1to16) {
-    // Option B: 5% on average of Days 1-16 only
-    // Days 17-21 earn NO interest
-    const interest = avgDays1to16 * 0.05;
-    
+// ============================================================
+// ✅ NEW: Determine the interest rate for a given user.
+// Priority:
+//   1. user.premiumInterestRate (explicit, set per user)
+//   2. Plan-name mapping (fallback if rate field missing)
+//   3. Default 5% (Basic rate)
+// ============================================================
+function getUserInterestRate(user) {
+    // 1. Explicit rate on the user document
+    if (typeof user.premiumInterestRate === 'number' && user.premiumInterestRate > 0) {
+        return user.premiumInterestRate;
+    }
+
+    // 2. Plan-based fallback
+    switch (user.premiumPlan) {
+        case 'Investor': return 3;
+        case 'Premium':  return 4;
+        case 'Basic':
+        default:         return 5;
+    }
+}
+
+async function calculateAndPayInterest(userId, cycle, avgDays1to16, totalSavedDays1to16, interestRatePercent) {
+    // ✅ FIX: Use the caller-provided rate (per user), fall back to 5%
+    const ratePercent =
+        typeof interestRatePercent === 'number' && interestRatePercent > 0
+            ? interestRatePercent
+            : 5;
+
+    const rateDecimal = ratePercent / 100;
+    const interest = avgDays1to16 * rateDecimal;
+
     if (interest <= 0) return 0;
-    
+
     // 1. Record interest payment
     await db.collection('interestPayments').add({
         userId,
@@ -198,39 +225,40 @@ async function calculateAndPayInterest(userId, cycle, avgDays1to16, totalSavedDa
         avgDailyBalanceDays1to16: avgDays1to16,
         totalSavedDays1to16: totalSavedDays1to16,
         interestAmount: interest,
-        interestRate: 0.05,
+        interestRate: rateDecimal,
+        interestRatePercent: ratePercent,
         calculationBasis: 'Days 1-16 only - Days 17-21 earn NO interest',
         paidDate: new Date()
     });
-    
+
     // 2. Update user balance
     await db.collection('users').doc(userId).update({
         currentBalance: admin.firestore.FieldValue.increment(interest),
         totalInterestEarned: admin.firestore.FieldValue.increment(interest),
         totalPrincipalSaved: admin.firestore.FieldValue.increment(totalSavedDays1to16)
     });
-    
+
     // 3. Record transaction
     const userDoc = await db.collection('users').doc(userId).get();
     const user = userDoc.data();
-    
+
     await db.collection('transactions').add({
         userId,
         type: 'interest',
         amount: interest,
         cycle,
         day: 22,
-        description: `5% interest on average balance of Days 1-16 (₦${avgDays1to16.toLocaleString()})`,
+        description: `${ratePercent}% interest on average balance of Days 1-16 (₦${avgDays1to16.toLocaleString()})`,
         balanceAfter: (user.currentBalance || 0) + interest,
         createdAt: new Date()
     });
-    
+
     // 4. Update admin cumulative interest
     const adminRef = db.collection('adminSettings').doc('settings');
     const adminDoc = await adminRef.get();
     const cumulative = (adminDoc.exists ? adminDoc.data().cumulativeInterestPaid : 0) + interest;
     await adminRef.set({ cumulativeInterestPaid: cumulative }, { merge: true });
-    
+
     return interest;
 }
 
@@ -242,26 +270,26 @@ async function payReferralBonus(userId) {
             .where('referredId', '==', userId)
             .where('referrerPaid', '==', false)
             .get();
-        
+
         for (const doc of referralsSnapshot.docs) {
             const referral = doc.data();
             const referrerId = referral.referrerId;
-            
+
             // ✅ Use stored bonus amount or fallback to constant
             const bonusAmount = referral.referrerBonus || REFERRAL_CONSTANTS.REFERRER_BONUS;
-            
+
             // ✅ Give referrer bonus
             await db.collection('users').doc(referrerId).update({
                 currentBalance: admin.firestore.FieldValue.increment(bonusAmount),
                 totalPrincipalSaved: admin.firestore.FieldValue.increment(bonusAmount)
             });
-            
+
             // ✅ Mark referrer as paid
             await doc.ref.update({
                 referrerPaid: true,
                 referrerPaidAt: new Date()
             });
-            
+
             // ✅ Record transaction for referrer
             const referrerDoc = await db.collection('users').doc(referrerId).get();
             await db.collection('transactions').add({
@@ -272,7 +300,7 @@ async function payReferralBonus(userId) {
                 balanceAfter: referrerDoc.data().currentBalance || 0,
                 createdAt: new Date()
             });
-            
+
             console.log(`✅ Referrer ${referrerId} got ₦${bonusAmount} for referring ${userId}`);
         }
     } catch (error) {
@@ -282,25 +310,25 @@ async function payReferralBonus(userId) {
 
 async function dailyBalanceUpdate() {
     console.log(`[${new Date().toISOString()}] Starting daily balance update (Option B - Days 1-16 only)...`);
-    
+
     const usersSnapshot = await db.collection('users')
         .where('isActive', '==', true)
         .get();
-    
+
     let updatedCount = 0;
     let interestPaidTotal = 0;
     let skippedUsers = 0;
     let fixedUsers = 0;
-    
+
     for (const userDoc of usersSnapshot.docs) {
         const user = userDoc.data();
         const userId = userDoc.id;
         const currentDay = user.currentDay;
-        
+
         // ✅ FIX: Only use hasStartedCycle as the definitive check
         // If hasStartedCycle is false, user should be on Day 0
         const hasStarted = user.hasStartedCycle === true;
-        
+
         // ✅ FIX: If hasStartedCycle is false but currentDay > 0, reset it to 0
         if (!hasStarted && currentDay > 0) {
             console.log(`🔄 FIX: User ${userId} has hasStartedCycle: false but currentDay: ${currentDay} - Resetting to Day 0`);
@@ -316,13 +344,13 @@ async function dailyBalanceUpdate() {
             skippedUsers++;
             continue;
         }
-        
+
         if (!hasStarted) {
             console.log(`⏳ User ${userId} hasn't started cycle yet - skipping tracking`);
             skippedUsers++;
-            continue; 
+            continue;
         }
-        
+
         // ✅ ONLY run for users who have actually started
         await db.collection('dailyBalances').add({
             userId,
@@ -332,14 +360,14 @@ async function dailyBalanceUpdate() {
             day: currentDay,
             createdAt: new Date()
         });
-        
+
         // ONLY track Days 1-16 for interest calculation
         if (currentDay >= 1 && currentDay <= 16) {
             let oldAvg = user.avgDays1to16 || 0;
             let oldCount = user.days1to16Count || 0;
             let newCount = oldCount + 1;
             let newAvg = ((oldAvg * oldCount) + user.currentBalance) / newCount;
-            
+
             await db.collection('users').doc(userId).update({
                 avgDays1to16: newAvg,
                 days1to16Count: newCount,
@@ -347,27 +375,40 @@ async function dailyBalanceUpdate() {
                 totalSavedDays1to16: (user.totalSavedDays1to16 || 0) + (user.todaysDeposit || 0)
             });
         }
-        
+
         // Days 17-21: No tracking, no interest calculation
-        
+
         // Check if it's end of cycle (Day 22)
         if (currentDay >= 22) {
             const avgDays1to16 = user.avgDays1to16 || 0;
             const totalSavedDays1to16 = user.totalSavedDays1to16 || 0;
-            
-            const interest = await calculateAndPayInterest(userId, user.currentCycle, avgDays1to16, totalSavedDays1to16);
+
+            // ✅ NEW: Determine this user's rate before paying
+            const userRate = getUserInterestRate(user);
+
+            console.log(
+                `💰 User ${userId} (${user.premiumPlan || 'no plan'}) — rate: ${userRate}% | avg: ₦${avgDays1to16.toFixed(2)}`
+            );
+
+            const interest = await calculateAndPayInterest(
+                userId,
+                user.currentCycle,
+                avgDays1to16,
+                totalSavedDays1to16,
+                userRate
+            );
             interestPaidTotal += interest;
-            
+
             // ✅ Pay referral bonus if this is first cycle completion
             if (user.currentCycle === 1) {
                 await payReferralBonus(userId);
             }
-            
+
             // Move to next cycle
             const nextCycle = user.currentCycle + 1;
             const isGraduated = nextCycle > 8;
             const newBalance = user.currentBalance + interest;
-            
+
             const updateData = {
                 currentCycle: nextCycle,
                 currentDay: 1,
@@ -383,15 +424,15 @@ async function dailyBalanceUpdate() {
                 avgDailyBalanceThisCycle: newBalance,
                 lowestBalanceThisCycle: newBalance
             };
-            
+
             if (isGraduated) {
                 updateData.graduationDate = new Date();
             }
-            
+
             await db.collection('users').doc(userId).update(updateData);
             updatedCount++;
-            
-            console.log(`User ${userId}: Cycle ${user.currentCycle} complete. Days 1-16 avg: ₦${avgDays1to16.toFixed(2)}, Interest: ₦${interest.toFixed(2)}`);
+
+            console.log(`User ${userId}: Cycle ${user.currentCycle} complete. Days 1-16 avg: ₦${avgDays1to16.toFixed(2)}, Interest (${userRate}%): ₦${interest.toFixed(2)}`);
         } else {
             // ✅ Only runs for users who have started
             await db.collection('users').doc(userId).update({
@@ -401,43 +442,43 @@ async function dailyBalanceUpdate() {
             updatedCount++;
         }
     }
-    
+
     // Calculate total savings pool
     const allUsersSnapshot = await db.collection('users')
         .where('isActive', '==', true)
         .get();
-    
+
     let totalPool = 0;
     allUsersSnapshot.forEach(doc => {
         totalPool += doc.data().currentBalance;
     });
-    
+
     const adminRef = db.collection('adminSettings').doc('settings');
     const adminDoc = await adminRef.get();
     const settings = adminDoc.exists ? adminDoc.data() : {};
-    
+
     await adminRef.set({
         currentTotalSavingsPool: totalPool,
         updatedAt: new Date()
     }, { merge: true });
-    
+
     // Stop conditions (informational only - admin dashboard handles actions)
     let stopTriggered = false;
-    
+
     if (totalPool >= (settings.totalSavingsPoolLimit || 1200000)) {
         stopTriggered = true;
         console.log('⚠️ STOP CONDITION: Total savings pool limit reached');
     }
-    
+
     if ((settings.cumulativeInterestPaid || 0) >= (settings.budgetLimit || 500000)) {
         stopTriggered = true;
         console.log('⚠️ STOP CONDITION: Budget limit reached');
     }
-    
+
     if (stopTriggered && !settings.stopTriggered) {
         await adminRef.set({ stopTriggered: true }, { merge: true });
     }
-    
+
     console.log(`[${new Date().toISOString()}] Daily balance update complete.`);
     console.log(`   Updated: ${updatedCount} users`);
     console.log(`   Fixed: ${fixedUsers} users (had incorrect currentDay)`);
