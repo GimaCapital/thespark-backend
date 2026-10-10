@@ -1,3 +1,4 @@
+// thespark-backend/src/cron/dailyMessages.js
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 dotenv.config();
@@ -21,9 +22,13 @@ const serviceAccount = {
     privateKey: privateKey
 };
 
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-});
+// ✅ CHANGE 1: Guard initializeApp so importing this file doesn't crash
+// if firebase-admin was already initialized elsewhere (e.g. server.js)
+if (!admin.apps.length) {
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+    });
+}
 
 const db = admin.firestore();
 

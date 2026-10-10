@@ -1,157 +1,3 @@
-// const admin = require('firebase-admin');
-// const dotenv = require('dotenv');
-
-// dotenv.config();
-
-// const serviceAccount = {
-//     projectId: process.env.FIREBASE_PROJECT_ID,
-//     clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-//     privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
-// };
-
-// admin.initializeApp({
-//     credential: admin.credential.cert(serviceAccount)
-// });
-
-// const db = admin.firestore();
-
-// async function calculateAndPayInterest(userId, cycle, lowest, avg) {
-//     const combinedAvg = (lowest + avg) / 2;
-//     const interest = combinedAvg * 0.05;
-    
-//     if (interest <= 0) return 0;
-    
-//     await db.collection('interestPayments').add({
-//         userId,
-//         cycle,
-//         lowestBalance: lowest,
-//         avgDailyBalance: avg,
-//         interestAmount: interest,
-//         paidDate: new Date()
-//     });
-    
-//     await db.collection('users').doc(userId).update({
-//         currentBalance: admin.firestore.FieldValue.increment(interest),
-//         totalInterestEarned: admin.firestore.FieldValue.increment(interest)
-//     });
-    
-//     const adminRef = db.collection('adminSettings').doc('settings');
-//     const adminDoc = await adminRef.get();
-//     const cumulative = (adminDoc.exists ? adminDoc.data().cumulativeInterestPaid : 0) + interest;
-//     await adminRef.set({ cumulativeInterestPaid: cumulative }, { merge: true });
-    
-//     return interest;
-// }
-
-// async function dailyBalanceUpdate() {
-//     console.log(`[${new Date().toISOString()}] Starting daily balance update...`);
-    
-//     const usersSnapshot = await db.collection('users')
-//         .where('isActive', '==', true)
-//         .get();
-    
-//     let updatedCount = 0;
-//     let interestPaidTotal = 0;
-    
-//     for (const userDoc of usersSnapshot.docs) {
-//         const user = userDoc.data();
-//         const userId = userDoc.id;
-        
-//         await db.collection('dailyBalances').add({
-//             userId,
-//             date: new Date(),
-//             balance: user.currentBalance,
-//             cycle: user.currentCycle,
-//             day: user.currentDay,
-//             createdAt: new Date()
-//         });
-        
-//         let lowest = user.lowestBalanceThisCycle;
-//         if (user.currentBalance < lowest || lowest === 0) {
-//             lowest = user.currentBalance;
-//         }
-        
-//         const currentDay = user.currentDay;
-//         let oldAvg = user.avgDailyBalanceThisCycle || user.currentBalance;
-//         let newAvg = ((oldAvg * (currentDay - 1)) + user.currentBalance) / currentDay;
-        
-//         if (currentDay >= 21) {
-//             const interest = await calculateAndPayInterest(userId, user.currentCycle, lowest, newAvg);
-//             interestPaidTotal += interest;
-            
-//             const nextCycle = user.currentCycle + 1;
-//             const isGraduated = nextCycle > 8;
-//             const newBalance = user.currentBalance + interest;
-            
-//             const updateData = {
-//                 currentCycle: nextCycle,
-//                 currentDay: 1,
-//                 cycleStartDate: new Date(),
-//                 lowestBalanceThisCycle: newBalance,
-//                 avgDailyBalanceThisCycle: newBalance
-//             };
-            
-//             if (isGraduated) {
-//                 updateData.graduationDate = new Date();
-//             }
-            
-//             await db.collection('users').doc(userId).update(updateData);
-//             updatedCount++;
-//         } else {
-//             await db.collection('users').doc(userId).update({
-//                 currentDay: currentDay + 1,
-//                 lowestBalanceThisCycle: lowest,
-//                 avgDailyBalanceThisCycle: newAvg
-//             });
-//             updatedCount++;
-//         }
-//     }
-    
-//     const allUsersSnapshot = await db.collection('users')
-//         .where('isActive', '==', true)
-//         .get();
-    
-//     let totalPool = 0;
-//     allUsersSnapshot.forEach(doc => {
-//         totalPool += doc.data().currentBalance;
-//     });
-    
-//     const adminRef = db.collection('adminSettings').doc('settings');
-//     const adminDoc = await adminRef.get();
-    
-//     await adminRef.set({
-//         currentTotalSavingsPool: totalPool,
-//         updatedAt: new Date()
-//     }, { merge: true });
-    
-//     const settings = adminDoc.exists ? adminDoc.data() : {};
-//     let stopTriggered = false;
-    
-//     if (totalPool >= (settings.totalSavingsPoolLimit || 1200000)) {
-//         stopTriggered = true;
-//         console.log('STOP CONDITION: Total savings pool limit reached');
-//     }
-    
-//     if ((settings.cumulativeInterestPaid || 0) >= (settings.budgetLimit || 500000)) {
-//         stopTriggered = true;
-//         console.log('STOP CONDITION: Budget limit reached');
-//     }
-    
-//     if (stopTriggered && !settings.stopTriggered) {
-//         await adminRef.set({ stopTriggered: true }, { merge: true });
-//     }
-    
-//     console.log(`[${new Date().toISOString()}] Daily balance update complete. Updated: ${updatedCount} users. Interest paid: ₦${interestPaidTotal.toFixed(2)}. Total pool: ₦${totalPool.toFixed(2)}`);
-// }
-
-// dailyBalanceUpdate()
-//     .then(() => process.exit(0))
-//     .catch((error) => {
-//         console.error('Error:', error);
-//         process.exit(1);
-//     });
-
-
 // thespark-backend/src/cron/dailyBalanceUpdate.js
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
@@ -178,9 +24,13 @@ const serviceAccount = {
     privateKey: privateKey
 };
 
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-});
+// ✅ CHANGE 1: Guard initializeApp so importing this file doesn't crash
+// if firebase-admin was already initialized elsewhere (e.g. server.js)
+if (!admin.apps.length) {
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+    });
+}
 
 const db = admin.firestore();
 
@@ -488,10 +338,16 @@ async function dailyBalanceUpdate() {
     console.log(`   Cumulative interest: ₦${(settings.cumulativeInterestPaid || 0).toFixed(2)}`);
 }
 
-// Run the function
-dailyBalanceUpdate()
-    .then(() => process.exit(0))
-    .catch((error) => {
-        console.error('Error:', error);
-        process.exit(1);
-    });
+// ✅ CHANGE 2: Only auto-run when executed directly (`npm run cron` or `node file`).
+// When imported from server.js, we skip this and expose the function instead.
+if (require.main === module) {
+    dailyBalanceUpdate()
+        .then(() => process.exit(0))
+        .catch((error) => {
+            console.error('Error:', error);
+            process.exit(1);
+        });
+}
+
+// ✅ CHANGE 3: Export for HTTP-triggered cron endpoint (used by server.js)
+module.exports = { runDailyBalanceUpdate: dailyBalanceUpdate };
