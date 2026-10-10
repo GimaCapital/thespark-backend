@@ -1058,7 +1058,8 @@
 // });
 
 // module.exports = router;
-// src/routes/flutterwave.js
+
+// C:\Users\HP\Desktop\TheSpark\thespark-backend\src\routes\flutterwave.js
 const express = require('express');
 const axios = require('axios');
 const { db } = require('../services/firebase');
@@ -1091,416 +1092,303 @@ const createNotification = async (userId, title, message, type) => {
     }
 };
 
+// ============ SHARED DEPOSIT HANDLER ============
+async function handleChargeCompleted(event) {
+    const data = event.data;
+    const email = data.customer?.email;
+    const paidAmount = Number(data.amount);
+    const chargeId = data.id ? String(data.id) : null;
+    const reference = data.flw_ref || data.tx_ref || data.reference || null;
+
+    console.log(`💰 Webhook: ₦${paidAmount} from ${email} (ref: ${reference})`);
+
+    if (!email) {
+        console.error('❌ No email in webhook payload');
+        return;
+    }
+
+    // 1. Find user
+    const usersSnapshot = await db.collection('users')
+        .where('email', '==', email)
+        .limit(1)
+        .get();
+
+    if (usersSnapshot.empty) {
+        console.error(`❌ User not found for email: ${email}`);
+        await db.collection('orphanPayments').add({
+            email,
+            paidAmount,
+            reference,
+            chargeId,
+            reason: 'no_user_for_email',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return;
+    }
+
+    const userDoc = usersSnapshot.docs[0];
+    const userId = userDoc.id;
+    const user = userDoc.data();
+    const currentBalance = user.currentBalance || 0;
+    const currentDay = user.currentDay || 0;
+    const plan = user.premiumPlan || 'Basic';
+    const limits = getPlanLimits(plan);
+
+    // 2. Idempotency — skip if already credited
+    if (chargeId) {
+        const existing = await db.collection('transactions')
+            .where('flwChargeId', '==', chargeId)
+            .limit(1)
+            .get();
+        if (!existing.empty) {
+            console.log('Duplicate webhook received, skipping');
+            return;
+        }
+    }
+
+    // 3. Find newest pending intent
+    const intentSnapshot = await db.collection('depositIntents')
+        .where('userId', '==', userId)
+        .where('status', '==', 'pending')
+        .get();
+
+    const pending = [];
+    intentSnapshot.forEach(doc => pending.push({ id: doc.id, ...doc.data() }));
+
+    pending.sort((a, b) => {
+        const ta = a.createdAt?.toDate?.() ?? new Date(a.createdAt || 0);
+        const tb = b.createdAt?.toDate?.() ?? new Date(b.createdAt || 0);
+        return tb - ta;
+    });
+
+    const intent = pending[0] || null;
+
+    // 4. No intent → flag & notify
+    if (!intent) {
+        console.warn(`⚠️ No pending intent for user ${userId}, ₦${paidAmount} flagged`);
+        await db.collection('flaggedDeposits').add({
+            userId,
+            paidAmount,
+            plan,
+            reference,
+            chargeId,
+            status: 'no_matching_intent',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        await createNotification(
+            userId,
+            '❌ Deposit Could Not Be Credited',
+            `We received ₦${paidAmount.toLocaleString()} but couldn't find a matching deposit request. Please contact support with reference ${reference}.`,
+            'deposit_rejected'
+        );
+        return;
+    }
+
+    const savingsAmount = Number(intent.amount);
+    const expectedGross = Number(intent.totalWithFee);
+
+    // 5. Validate savings against plan (intent.amount, NOT data.amount)
+    if (savingsAmount < limits.min || savingsAmount > limits.max) {
+        console.warn(`⚠️ Intent ₦${savingsAmount} outside ${plan} limits`);
+
+        await db.collection('rejectedDeposits').add({
+            userId,
+            amount: savingsAmount,
+            paidAmount,
+            plan,
+            minLimit: limits.min,
+            maxLimit: limits.max,
+            reason: `Savings amount outside ${plan} plan limits`,
+            flwReference: reference,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        await db.collection('depositIntents').doc(intent.id).update({
+            status: 'failed',
+            failureReason: 'outside_plan_limits',
+            failedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        await createNotification(
+            userId,
+            '❌ Deposit Not Credited',
+            `Your payment of ₦${paidAmount.toLocaleString()} was received but the deposit amount (₦${savingsAmount.toLocaleString()}) is outside your ${plan} plan limits (₦${limits.min}–₦${limits.max}). Contact support with reference ${reference}.`,
+            'deposit_rejected'
+        );
+        return;
+    }
+
+    // 6. Validate paid amount matches intent total
+    if (paidAmount !== expectedGross) {
+        console.warn(`⚠️ Amount mismatch: expected ₦${expectedGross}, received ₦${paidAmount}`);
+
+        await db.collection('flaggedDeposits').add({
+            userId,
+            intendedAmount: savingsAmount,
+            expectedAmount: expectedGross,
+            actualAmount: paidAmount,
+            status: 'review_needed',
+            flwReference: reference,
+            chargeId,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        await db.collection('depositIntents').doc(intent.id).update({
+            status: 'failed',
+            failureReason: 'amount_mismatch',
+            failedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        await createNotification(
+            userId,
+            '⚠️ Deposit Under Review',
+            `We received ₦${paidAmount.toLocaleString()} but expected ₦${expectedGross.toLocaleString()}. Your deposit is under review — contact support with reference ${reference}.`,
+            'deposit_review'
+        );
+        return;
+    }
+
+    // 7. All good — mark matched and credit user
+    await db.collection('depositIntents').doc(intent.id).update({
+        status: 'matched',
+        matchedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const updateData = {
+        currentBalance: (currentBalance || 0) + savingsAmount,
+        totalPrincipalSaved: admin.firestore.FieldValue.increment(savingsAmount),
+        ...(currentDay <= 16 && {
+            totalSavedDays1to16: admin.firestore.FieldValue.increment(savingsAmount),
+        }),
+    };
+
+    // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
+    const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
+
+    if (!hasStarted) {
+        updateData.hasStartedCycle = true;
+        updateData.currentCycle = 1;
+        updateData.currentDay = 1;
+        updateData.cycleStartDate = admin.firestore.FieldValue.serverTimestamp();
+        console.log(`🎉 User ${userId} started their cycle with first deposit via webhook!`);
+    }
+
+    await db.collection('users').doc(userId).update(updateData);
+
+    const transactionData = {
+        userId,
+        type: 'deposit',
+        amount: savingsAmount,
+        grossAmount: paidAmount,
+        feeAmount: paidAmount - savingsAmount,
+        method: 'bank_transfer',
+        provider: 'flutterwave',
+        cycle: user.currentCycle || 0,
+        day: currentDay,
+        balanceAfter: (currentBalance || 0) + savingsAmount,
+        isDays1to16: currentDay <= 16,
+        earnsInterest: currentDay <= 16,
+        description: 'Deposit via bank transfer',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (chargeId) transactionData.flwChargeId = chargeId;
+    if (reference) transactionData.flwReference = reference;
+
+    await db.collection('transactions').add(transactionData);
+
+    await db.collection('adminSettings').doc('settings').update({
+        currentTotalSavingsPool: admin.firestore.FieldValue.increment(savingsAmount),
+    });
+
+    console.log(`✅ Credited ₦${savingsAmount} to user ${userId} (paid ₦${paidAmount})`);
+
+    await createNotification(
+        userId,
+        '✅ Deposit Successful',
+        `Your deposit of ₦${savingsAmount.toLocaleString()} has been successfully added to your savings balance. ${currentDay <= 16 ? 'This deposit will earn interest!' : '⚠️ Days 17-21 deposits earn NO interest.'}`,
+        'deposit_approved'
+    );
+}
+
 // ============ WEBHOOK (NO AUTHENTICATION REQUIRED) ============
 router.post('/webhook', async (req, res) => {
     console.log('💰 Flutterwave webhook received');
     console.log('Webhook body:', JSON.stringify(req.body, null, 2));
-    
+
     const secretHash = process.env.FLW_SECRET_HASH;
     const signature = req.headers['verif-hash'];
-    
+
     if (!secretHash) {
         console.error('❌ FLW_SECRET_HASH not configured in .env');
         return res.status(200).send('OK');
     }
-    
+
     if (signature !== secretHash) {
         console.error('❌ Invalid webhook signature');
         return res.status(401).send('Invalid signature');
     }
-    
+
     console.log('✅ Webhook signature verified');
-    
+
     res.status(200).send('OK');
-    
+
     try {
         const event = req.body;
-        
-        if (event.event === 'charge.completed' && event.data?.status === 'successful') {
-            const data = event.data;
-            const email = data.customer?.email;
-            const amount = data.amount;
-            const chargeId = data.id ? String(data.id) : null;
-            const reference = data.flw_ref || data.tx_ref || null;
-            
-            console.log(`💰 v3 Webhook: Deposit of ₦${amount} from ${email}`);
-            
-            if (!email) {
-                console.error('❌ No email in webhook payload');
-                return;
-            }
-            
-            const usersSnapshot = await db.collection('users')
-                .where('email', '==', email)
-                .limit(1)
-                .get();
-            
-            if (!usersSnapshot.empty) {
-                const userDoc = usersSnapshot.docs[0];
-                const userId = userDoc.id;
-                const user = userDoc.data();
-                const currentBalance = user.currentBalance || 0;
-                const currentDay = user.currentDay || 0;
-                const plan = user.premiumPlan || 'Basic';
-                const limits = getPlanLimits(plan);
-                
-                if (amount < limits.min || amount > limits.max) {
-                    console.log(`⚠️ Deposit ₦${amount} rejected - outside ${plan} plan limits`);
-                    
-                    await db.collection('rejectedDeposits').add({
-                        userId: userId,
-                        amount: amount,
-                        plan: plan,
-                        minLimit: limits.min,
-                        maxLimit: limits.max,
-                        reason: `Amount outside ${plan} plan limits`,
-                        flwReference: reference,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
-                    
-                    return;
-                }
-                
-                let existingTx = null;
-                if (chargeId) {
-                    const existingSnapshot = await db.collection('transactions')
-                        .where('flwChargeId', '==', chargeId)
-                        .limit(1)
-                        .get();
-                    if (!existingSnapshot.empty) {
-                        existingTx = existingSnapshot.docs[0];
-                    }
-                }
-                
-                if (existingTx) {
-                    console.log('Duplicate webhook received, skipping');
-                    return;
-                }
-                
-                const intentSnapshot = await db.collection('depositIntents')
-                    .where('userId', '==', userId)
-                    .get();
-                
-                let isValidDeposit = true;
-                let matchedIntent = null;
-                
-                if (!intentSnapshot.empty) {
-                    const pendingIntents = [];
-                    intentSnapshot.forEach(doc => {
-                        const intent = doc.data();
-                        if (intent.status === 'pending') {
-                            pendingIntents.push({ id: doc.id, ...intent });
-                        }
-                    });
-                    
-                    pendingIntents.sort((a, b) => {
-                        const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
-                        const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
-                        return dateB - dateA;
-                    });
-                    
-                    if (pendingIntents.length > 0) {
-                        const latestIntent = pendingIntents[0];
-                        matchedIntent = latestIntent;
-                        
-                        if (amount !== latestIntent.totalWithFee) {
-                            isValidDeposit = false;
-                            console.log(`⚠️ Amount mismatch: expected ₦${latestIntent.totalWithFee}, received ₦${amount}`);
-                            
-                            await db.collection('flaggedDeposits').add({
-                                userId: userId,
-                                intendedAmount: latestIntent.amount,
-                                expectedAmount: latestIntent.totalWithFee,
-                                actualAmount: amount,
-                                status: 'review_needed',
-                                flwReference: reference,
-                                createdAt: admin.firestore.FieldValue.serverTimestamp()
-                            });
-                        } else {
-                            await db.collection('depositIntents').doc(latestIntent.id).update({ 
-                                status: 'matched',
-                                matchedAt: admin.firestore.FieldValue.serverTimestamp(),
-                            });
-                        }
-                    }
-                }
-                
-                if (isValidDeposit && matchedIntent) {
-                    const savingsAmount = matchedIntent.amount;
-                    
-                    const updateData = {
-                        currentBalance: (currentBalance || 0) + savingsAmount,
-                        totalPrincipalSaved: admin.firestore.FieldValue.increment(savingsAmount),
-                        ...(currentDay <= 16 && { totalSavedDays1to16: admin.firestore.FieldValue.increment(savingsAmount) })
-                    };
-                    
-                    // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
-                    const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
-                    
-                    if (!hasStarted) {
-                        updateData.hasStartedCycle = true;
-                        updateData.currentCycle = 1;
-                        updateData.currentDay = 1;
-                        updateData.cycleStartDate = admin.firestore.FieldValue.serverTimestamp();
-                        console.log(`🎉 User ${userId} started their cycle with first deposit via webhook!`);
-                    }
-                    
-                    await db.collection('users').doc(userId).update(updateData);
-                    
-                    const transactionData = {
-                        userId: userId,
-                        type: 'deposit',
-                        amount: savingsAmount,
-                        method: 'bank_transfer',
-                        provider: 'flutterwave',
-                        cycle: user.currentCycle || 0,
-                        day: currentDay,
-                        balanceAfter: (currentBalance || 0) + savingsAmount,
-                        isDays1to16: currentDay <= 16,
-                        earnsInterest: currentDay <= 16,
-                        description: 'Deposit via bank transfer',
-                        createdAt: admin.firestore.FieldValue.serverTimestamp()
-                    };
-                    
-                    if (chargeId) transactionData.flwChargeId = chargeId;
-                    if (reference) transactionData.flwReference = reference;
-                    
-                    await db.collection('transactions').add(transactionData);
-                    
-                    await db.collection('adminSettings').doc('settings').update({
-                        currentTotalSavingsPool: admin.firestore.FieldValue.increment(savingsAmount)
-                    });
-                    
-                    console.log(`✅ Credited ₦${savingsAmount} to user ${userId}`);
-                    
-                    await createNotification(
-                        userId,
-                        '✅ Deposit Successful',
-                        `Your deposit of ₦${savingsAmount.toLocaleString()} has been successfully added to your savings balance. ${currentDay <= 16 ? 'This deposit will earn interest!' : '⚠️ Days 17-21 deposits earn NO interest.'}`,
-                        'deposit_approved'
-                    );
-                    
-                } else if (!isValidDeposit) {
-                    console.log(`❌ Deposit NOT credited - amount mismatch`);
-                }
-            } else {
-                console.error(`❌ User not found for email: ${email}`);
-            }
+
+        // ---- DEPOSIT ----
+        if (
+            (event.event === 'charge.completed' || event.type === 'charge.completed') &&
+            (event.data?.status === 'successful' || event.data?.status === 'succeeded')
+        ) {
+            await handleChargeCompleted(event);
         }
-        
-        if (event.type === 'charge.completed' && event.data?.status === 'succeeded') {
-            const data = event.data;
-            const email = data.customer?.email;
-            const amount = data.amount;
-            const chargeId = data.id;
-            const reference = data.reference;
-            
-            console.log(`💰 v3 Webhook: Deposit of ₦${amount} from ${email}`);
-            
-            if (!email) {
-                console.error('❌ No email in webhook payload');
-                return;
-            }
-            
-            const usersSnapshot = await db.collection('users')
-                .where('email', '==', email)
-                .limit(1)
-                .get();
-            
-            if (!usersSnapshot.empty) {
-                const userId = usersSnapshot.docs[0].id;
-                const user = usersSnapshot.docs[0].data();
-                const currentBalance = user.currentBalance || 0;
-                const currentDay = user.currentDay || 0;
-                const plan = user.premiumPlan || 'Basic';
-                const limits = getPlanLimits(plan);
-                
-                if (amount < limits.min || amount > limits.max) {
-                    console.log(`⚠️ Deposit ₦${amount} rejected - outside ${plan} plan limits`);
-                    
-                    await db.collection('rejectedDeposits').add({
-                        userId: userId,
-                        amount: amount,
-                        plan: plan,
-                        minLimit: limits.min,
-                        maxLimit: limits.max,
-                        reason: `Amount outside ${plan} plan limits`,
-                        flwReference: reference,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
-                    
-                    return;
-                }
-                
-                let existingTx = null;
-                if (chargeId) {
-                    const existingSnapshot = await db.collection('transactions')
-                        .where('flwChargeId', '==', chargeId)
-                        .limit(1)
-                        .get();
-                    if (!existingSnapshot.empty) {
-                        existingTx = existingSnapshot.docs[0];
-                    }
-                }
-                
-                if (existingTx) {
-                    console.log('Duplicate webhook received, skipping');
-                    return;
-                }
-                
-                const intentSnapshot = await db.collection('depositIntents')
-                    .where('userId', '==', userId)
-                    .get();
-                
-                let isValidDeposit = true;
-                let matchedIntent = null;
-                
-                if (!intentSnapshot.empty) {
-                    const pendingIntents = [];
-                    intentSnapshot.forEach(doc => {
-                        const intent = doc.data();
-                        if (intent.status === 'pending') {
-                            pendingIntents.push({ id: doc.id, ...intent });
-                        }
-                    });
-                    
-                    pendingIntents.sort((a, b) => {
-                        const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
-                        const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
-                        return dateB - dateA;
-                    });
-                    
-                    if (pendingIntents.length > 0) {
-                        const latestIntent = pendingIntents[0];
-                        matchedIntent = latestIntent;
-                        
-                        if (amount !== latestIntent.totalWithFee) {
-                            isValidDeposit = false;
-                            console.log(`⚠️ Amount mismatch: expected ₦${latestIntent.totalWithFee}, received ₦${amount}`);
-                            
-                            await db.collection('flaggedDeposits').add({
-                                userId: userId,
-                                intendedAmount: latestIntent.amount,
-                                expectedAmount: latestIntent.totalWithFee,
-                                actualAmount: amount,
-                                status: 'review_needed',
-                                flwReference: reference,
-                                createdAt: admin.firestore.FieldValue.serverTimestamp()
-                            });
-                        } else {
-                            await db.collection('depositIntents').doc(latestIntent.id).update({ 
-                                status: 'matched',
-                                matchedAt: admin.firestore.FieldValue.serverTimestamp(),
-                            });
-                        }
-                    }
-                }
-                
-                if (isValidDeposit && matchedIntent) {
-                    const savingsAmount = matchedIntent.amount;
-                    
-                    const updateData = {
-                        currentBalance: (currentBalance || 0) + savingsAmount,
-                        totalPrincipalSaved: admin.firestore.FieldValue.increment(savingsAmount),
-                        ...(currentDay <= 16 && { totalSavedDays1to16: admin.firestore.FieldValue.increment(savingsAmount) })
-                    };
-                    
-                    // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
-                    const hasStarted = user.hasStartedCycle === true || user.currentDay > 0;
-                    
-                    if (!hasStarted) {
-                        updateData.hasStartedCycle = true;
-                        updateData.currentCycle = 1;
-                        updateData.currentDay = 1;
-                        updateData.cycleStartDate = admin.firestore.FieldValue.serverTimestamp();
-                        console.log(`🎉 User ${userId} started their cycle with first deposit via webhook!`);
-                    }
-                    
-                    await db.collection('users').doc(userId).update(updateData);
-                    
-                    const transactionData = {
-                        userId: userId,
-                        type: 'deposit',
-                        amount: savingsAmount,
-                        method: 'bank_transfer',
-                        provider: 'flutterwave',
-                        cycle: user.currentCycle || 0,
-                        day: currentDay,
-                        balanceAfter: (currentBalance || 0) + savingsAmount,
-                        isDays1to16: currentDay <= 16,
-                        earnsInterest: currentDay <= 16,
-                        description: 'Deposit via bank transfer',
-                        createdAt: admin.firestore.FieldValue.serverTimestamp()
-                    };
-                    
-                    if (chargeId) transactionData.flwChargeId = chargeId;
-                    if (reference) transactionData.flwReference = reference;
-                    
-                    await db.collection('transactions').add(transactionData);
-                    
-                    await db.collection('adminSettings').doc('settings').update({
-                        currentTotalSavingsPool: admin.firestore.FieldValue.increment(savingsAmount)
-                    });
-                    
-                    console.log(`✅ Credited ₦${savingsAmount} to user ${userId}`);
-                    
-                    await createNotification(
-                        userId,
-                        '✅ Deposit Successful',
-                        `Your deposit of ₦${savingsAmount.toLocaleString()} has been successfully added to your savings balance. ${currentDay <= 16 ? 'This deposit will earn interest!' : '⚠️ Days 17-21 deposits earn NO interest.'}`,
-                        'deposit_approved'
-                    );
-                    
-                } else if (!isValidDeposit) {
-                    console.log(`❌ Deposit NOT credited - amount mismatch`);
-                }
-            }
-        }
-        
+
+        // ---- WITHDRAWAL COMPLETED ----
         if (event.event === 'transfer.completed') {
             console.log('💰 Transfer completed:', event.data?.reference);
-            
+
             const transferData = event.data;
             const reference = transferData.reference;
             const status = transferData.status;
-            
+
             const withdrawalSnapshot = await db.collection('withdrawalRequests')
                 .where('transferReference', '==', reference)
                 .limit(1)
                 .get();
-            
+
             if (!withdrawalSnapshot.empty) {
                 const withdrawalDoc = withdrawalSnapshot.docs[0];
                 const withdrawalId = withdrawalDoc.id;
                 const withdrawalData = withdrawalDoc.data();
                 const userId = withdrawalData.userId;
-                
+
                 if (status === 'SUCCESSFUL') {
                     await db.collection('withdrawalRequests').doc(withdrawalId).update({
                         status: 'completed',
                         completedAt: new Date(),
                         flutterwaveStatus: status
                     });
-                    
+
                     await createNotification(
                         userId,
                         '✅ Withdrawal Completed',
                         `Your withdrawal of ₦${withdrawalData.amount.toLocaleString()} has been completed successfully.`,
                         'withdrawal_completed'
                     );
-                    
+
                     console.log(`✅ Withdrawal ${reference} completed successfully`);
                 } else if (status === 'FAILED') {
                     const userRef = db.collection('users').doc(userId);
                     const totalDeduction = withdrawalData.totalDeduction || withdrawalData.amount + (withdrawalData.fee || 0);
-                    
+
                     await userRef.update({
                         currentBalance: admin.firestore.FieldValue.increment(totalDeduction),
                         totalWithdrawn: admin.firestore.FieldValue.increment(-withdrawalData.amount)
                     });
-                    
+
                     console.log(`🔄 Refunded ₦${totalDeduction} to user ${userId}`);
-                    
+
                     await db.collection('withdrawalRequests').doc(withdrawalId).update({
                         status: 'failed',
                         flutterwaveStatus: status,
@@ -1509,44 +1397,45 @@ router.post('/webhook', async (req, res) => {
                         refunded: true,
                         refundedAt: new Date()
                     });
-                    
+
                     await createNotification(
                         userId,
                         '❌ Withdrawal Failed',
                         `Your withdrawal of ₦${withdrawalData.amount.toLocaleString()} failed. Your money has been refunded.`,
                         'withdrawal_failed'
                     );
-                    
+
                     console.log(`❌ Withdrawal ${reference} failed`);
                 }
             }
         }
-        
+
+        // ---- WITHDRAWAL FAILED ----
         if (event.event === 'transfer.failed') {
             console.error('❌ Transfer failed:', event.data?.reference);
-            
+
             const transferData = event.data;
             const reference = transferData.reference;
-            
+
             const withdrawalSnapshot = await db.collection('withdrawalRequests')
                 .where('transferReference', '==', reference)
                 .limit(1)
                 .get();
-            
+
             if (!withdrawalSnapshot.empty) {
                 const withdrawalDoc = withdrawalSnapshot.docs[0];
                 const withdrawalId = withdrawalDoc.id;
                 const withdrawalData = withdrawalDoc.data();
                 const userId = withdrawalData.userId;
-                
+
                 const userRef = db.collection('users').doc(userId);
                 const totalDeduction = withdrawalData.totalDeduction || withdrawalData.amount + (withdrawalData.fee || 0);
-                
+
                 await userRef.update({
                     currentBalance: admin.firestore.FieldValue.increment(totalDeduction),
                     totalWithdrawn: admin.firestore.FieldValue.increment(-withdrawalData.amount)
                 });
-                
+
                 await db.collection('withdrawalRequests').doc(withdrawalId).update({
                     status: 'failed',
                     flutterwaveStatus: 'FAILED',
@@ -1555,18 +1444,18 @@ router.post('/webhook', async (req, res) => {
                     refunded: true,
                     refundedAt: new Date()
                 });
-                
+
                 await createNotification(
                     userId,
                     '❌ Withdrawal Failed',
                     `Your withdrawal of ₦${withdrawalData.amount.toLocaleString()} failed. Your money has been refunded.`,
                     'withdrawal_failed'
                 );
-                
+
                 console.log(`❌ Transfer failed for reference: ${reference}`);
             }
         }
-        
+
     } catch (error) {
         console.error('❌ Error processing webhook:', error);
     }
@@ -1579,7 +1468,7 @@ router.use(authenticate);
 router.get('/banks', async (req, res) => {
     try {
         console.log('🟡 Fetching banks from Flutterwave...');
-        
+
         const tokenRes = await axios.post(
             'https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token',
             new URLSearchParams({
@@ -1588,9 +1477,9 @@ router.get('/banks', async (req, res) => {
                 grant_type: 'client_credentials'
             })
         );
-        
+
         const token = tokenRes.data.access_token;
-        
+
         const response = await axios.get(
             'https://api.flutterwave.com/banks',
             {
@@ -1601,13 +1490,13 @@ router.get('/banks', async (req, res) => {
                 }
             }
         );
-        
+
         if (response.data.status === 'success') {
             const banks = response.data.data.map(bank => ({
                 code: bank.code,
                 name: bank.name
             }));
-            
+
             res.json({ success: true, banks: banks });
         } else {
             res.status(500).json({ error: 'Failed to fetch banks' });
@@ -1622,16 +1511,16 @@ router.get('/banks', async (req, res) => {
 router.post('/create-account', async (req, res) => {
     const userId = req.user.uid;
     const { email, fullName } = req.body;
-    
+
     try {
         const userDoc = await db.collection('users').doc(userId).get();
-        
+
         if (!userDoc.exists) {
             return res.status(404).json({ error: 'User not found' });
         }
-        
+
         const user = userDoc.data();
-        
+
         if (user.flwAccountNumber) {
             return res.json({
                 success: true,
@@ -1641,21 +1530,21 @@ router.post('/create-account', async (req, res) => {
                 message: 'Virtual account already exists'
             });
         }
-        
+
         const result = await createUserVirtualAccount({
             fullName: fullName || user.fullName,
             email: email || user.email,
             bvn: user.bvn,
             phone: user.phone
         });
-        
+
         if (result.success) {
             await db.collection('users').doc(userId).update({
                 flwAccountNumber: result.accountNumber,
                 flwBankName: result.bankName,
                 flwCreatedAt: admin.firestore.FieldValue.serverTimestamp()
             });
-            
+
             res.json({
                 success: true,
                 hasAccount: true,
@@ -1675,11 +1564,11 @@ router.post('/create-account', async (req, res) => {
 // Get user's virtual account
 router.get('/my-account', async (req, res) => {
     const userId = req.user.uid;
-    
+
     try {
         const userDoc = await db.collection('users').doc(userId).get();
         const user = userDoc.data();
-        
+
         if (user.flwAccountNumber) {
             return res.json({
                 success: true,
@@ -1689,7 +1578,7 @@ router.get('/my-account', async (req, res) => {
                 fullName: user.fullName
             });
         }
-        
+
         res.json({ success: true, hasAccount: false });
     } catch (error) {
         console.error('Error getting virtual account:', error);
@@ -1699,14 +1588,14 @@ router.get('/my-account', async (req, res) => {
 
 router.post('/validate-account', authenticate, async (req, res) => {
     const { bankCode, accountNumber } = req.body;
-    
+
     if (!bankCode || !accountNumber) {
         return res.status(400).json({ success: false, message: 'Bank code and account number required' });
     }
-    
+
     try {
         const secretKey = process.env.FLW_SECRET_KEY;
-        
+
         const response = await axios.post(
             'https://api.flutterwave.com/v3/accounts/resolve',
             {
@@ -1721,7 +1610,7 @@ router.post('/validate-account', authenticate, async (req, res) => {
                 timeout: 10000
             }
         );
-        
+
         if (response.data.status === 'success') {
             return res.json({
                 success: true,
@@ -1733,10 +1622,10 @@ router.post('/validate-account', authenticate, async (req, res) => {
                 message: response.data.message || 'Account not found'
             });
         }
-        
+
     } catch (error) {
         console.error('❌ Account validation error:', error.response?.status, error.response?.data || error.message);
-        
+
         return res.json({
             success: false,
             message: error.response?.data?.message || 'Failed to validate account. Please try again.'
