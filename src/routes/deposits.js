@@ -410,7 +410,6 @@
 // });
 
 // module.exports = router;
-
 // C:\Users\HP\Desktop\TheSpark\thespark-backend\src\routes\deposits.js
 const express = require('express');
 const { db } = require('../services/firebase');
@@ -533,6 +532,31 @@ router.post('/intent', authenticate, async (req, res) => {
     
     if (day !== user.currentDay) {
         return res.status(400).json({ error: 'Day mismatch' });
+    }
+    
+    // ✅ NEW: Enforce daily savings limit
+    const lastDay = user.lastDepositDay;
+    const todaysDeposit = lastDay === user.currentDay ? (user.todaysDeposit || 0) : 0;
+    const remaining = limits.max - todaysDeposit;
+    
+    if (remaining <= 0) {
+        return res.status(400).json({
+            error: `You have reached your daily savings limit of ₦${limits.max.toLocaleString()} for today. Come back tomorrow.`,
+            code: 'DAILY_LIMIT_REACHED',
+            dailyLimit: limits.max,
+            savedToday: todaysDeposit,
+            remaining: 0,
+        });
+    }
+    
+    if (amount > remaining) {
+        return res.status(400).json({
+            error: `You can only save up to ₦${remaining.toLocaleString()} more today.`,
+            code: 'DAILY_LIMIT_EXCEEDED',
+            dailyLimit: limits.max,
+            savedToday: todaysDeposit,
+            remaining: remaining,
+        });
     }
     
     const totalWithFee = calculateTotal(amount);

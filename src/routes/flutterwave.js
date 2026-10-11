@@ -1058,7 +1058,6 @@
 // });
 
 // module.exports = router;
-
 // C:\Users\HP\Desktop\TheSpark\thespark-backend\src\routes\flutterwave.js
 const express = require('express');
 const axios = require('axios');
@@ -1248,6 +1247,43 @@ async function handleChargeCompleted(event) {
         return;
     }
 
+    // ✅ NEW: 6b. Enforce daily savings limit
+    const lastDay = user.lastDepositDay;
+    const isSameDay = lastDay === currentDay;
+    const previousToday = isSameDay ? (user.todaysDeposit || 0) : 0;
+    const remainingToday = limits.max - previousToday;
+
+    if (savingsAmount > remainingToday) {
+        console.warn(`⚠️ Daily limit reached for user ${userId}: saved ₦${previousToday} today, limit ₦${limits.max}`);
+
+        await db.collection('rejectedDeposits').add({
+            userId,
+            amount: savingsAmount,
+            paidAmount,
+            plan,
+            reason: 'daily_limit_reached',
+            alreadySavedToday: previousToday,
+            dailyLimit: limits.max,
+            flwReference: reference,
+            chargeId,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        await db.collection('depositIntents').doc(intent.id).update({
+            status: 'failed',
+            failureReason: 'daily_limit_reached',
+            failedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        await createNotification(
+            userId,
+            '❌ Deposit Not Credited',
+            `You have already saved ₦${previousToday.toLocaleString()} today. Your daily limit is ₦${limits.max.toLocaleString()}. Contact support with reference ${reference}.`,
+            'deposit_rejected'
+        );
+        return;
+    }
+
     // 7. All good — mark matched and credit user
     await db.collection('depositIntents').doc(intent.id).update({
         status: 'matched',
@@ -1260,6 +1296,9 @@ async function handleChargeCompleted(event) {
         ...(currentDay <= 16 && {
             totalSavedDays1to16: admin.firestore.FieldValue.increment(savingsAmount),
         }),
+        // ✅ NEW: track daily deposit total for the daily-limit rule
+        todaysDeposit: previousToday + savingsAmount,
+        lastDepositDay: currentDay,
     };
 
     // ✅ FIX: For old users without hasStartedCycle, check if currentDay > 0
