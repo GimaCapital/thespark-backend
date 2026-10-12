@@ -837,12 +837,13 @@
 
 
 
-
+// C:\Users\HP\Desktop\TheSpark\thespark-backend\src\routes\admin.js
 const express = require('express');
 const { db } = require('../services/firebase');
 const { authenticate, isAdmin } = require('../middleware/auth');
 const admin = require('firebase-admin');
-const { calculateWithdrawalFee } = require('../utils/feeUtils'); // ✅ IMPORT FEE UTILITY
+const { executeWithdrawal } = require('../services/flutterwaveAutoWithdrawTransfer');
+const { calculateWithdrawalFee } = require('../utils/feeUtils'); 
 const router = express.Router();
 
 // ============ HELPER FUNCTION ============
@@ -922,322 +923,475 @@ router.get('/users/:userId', async (req, res) => {
 });
 
 // ✅ FIXED: Withdrawal approval with proper error handling - variables declared outside try
+// router.post('/withdrawals/:requestId/approve', async (req, res) => {
+//     const { requestId } = req.params;
+//     const adminId = req.user.uid;
+//     const axios = require('axios');
+    
+//     // ✅ Declare variables OUTSIDE try block so they're accessible in catch
+//     let request = null;
+//     let requestRef = null;
+//     let user = null;
+//     let userRef = null;
+//     let feeDetails = null;
+//     let totalDeduction = 0;
+    
+//     try {
+//         // 1. Check admin
+//         const adminDoc = await db.collection('users').doc(adminId).get();
+//         if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
+//             return res.status(403).json({ error: 'Admin access required' });
+//         }
+        
+//         // 2. Get withdrawal request
+//         requestRef = db.collection('withdrawalRequests').doc(requestId);
+//         const requestDoc = await requestRef.get();
+        
+//         if (!requestDoc.exists) {
+//             return res.status(404).json({ error: 'Request not found' });
+//         }
+        
+//         request = requestDoc.data();
+        
+//         if (request.status !== 'pending') {
+//             return res.status(400).json({ error: 'Request already processed' });
+//         }
+        
+//         // 3. Get user - ✅ CHECK IF USER EXISTS
+//         userRef = db.collection('users').doc(request.userId);
+//         const userDoc = await userRef.get();
+        
+//         if (!userDoc.exists) {
+//             console.log(`❌ User ${request.userId} not found for withdrawal ${requestId}`);
+//             await requestRef.update({
+//                 status: 'rejected',
+//                 reason: 'User account no longer exists',
+//                 processedAt: new Date(),
+//                 processedBy: adminId
+//             });
+//             return res.status(400).json({ error: 'User account no longer exists' });
+//         }
+        
+//         user = userDoc.data();
+        
+//         // ✅ Calculate fee using imported function
+//         feeDetails = calculateWithdrawalFee(request.amount);
+//         totalDeduction = request.amount + feeDetails.totalFee;
+        
+//         if (totalDeduction > user.currentBalance) {
+//             await requestRef.update({
+//                 status: 'rejected',
+//                 reason: 'Insufficient balance',
+//                 processedAt: new Date(),
+//                 processedBy: adminId
+//             });
+            
+//             // ===== ✅ ADDED: Send rejection notification for insufficient balance =====
+//             await createNotification(
+//                 request.userId,
+//                 '❌ Withdrawal Rejected',
+//                 `Your withdrawal of ₦${request.amount.toLocaleString()} was rejected due to insufficient balance.`,
+//                 'withdrawal_rejected'
+//             );
+//             // ===== END ADDED =====
+            
+//             return res.status(400).json({ error: 'Insufficient balance' });
+//         }
+        
+//         if (!user.bankCode || !user.accountNumber) {
+//             await requestRef.update({
+//                 status: 'rejected',
+//                 reason: 'No bank account',
+//                 processedAt: new Date(),
+//                 processedBy: adminId
+//             });
+            
+//             // ===== ✅ ADDED: Send rejection notification for no bank account =====
+//             await createNotification(
+//                 request.userId,
+//                 '❌ Withdrawal Rejected',
+//                 `Your withdrawal of ₦${request.amount.toLocaleString()} was rejected because you don't have a bank account set up. Please add your bank details.`,
+//                 'withdrawal_rejected'
+//             );
+//             // ===== END ADDED =====
+            
+//             return res.status(400).json({ error: 'User has no bank account' });
+//         }
+        
+//         const secretKey = process.env.FLW_SECRET_KEY;
+        
+//         if (!secretKey) {
+//             throw new Error('FLW_SECRET_KEY not configured in .env');
+//         }
+        
+//         console.log('📡 Using FLW_SECRET_KEY for withdrawal');
+//         console.log('   Bank Code:', user.bankCode);
+//         console.log('   Bank Name:', user.bankName);
+//         console.log('   Account:', user.accountNumber);
+//         console.log('   Amount: ₦' + request.amount);
+//         console.log('   Fee: ₦' + feeDetails.fee);
+//         console.log('   Total Deduction: ₦' + totalDeduction);
+//         console.log('   Account Name:', user.accountName);
+        
+//         const reference = `WTH${Date.now()}${request.userId.slice(0, 8)}`;
+        
+//         // ============ GET OR CREATE BENEFICIARY ============
+//         let beneficiaryId = null;
+        
+//         console.log('📡 Creating beneficiary...');
+        
+//         try {
+//             const beneficiaryRes = await axios.post(
+//                 'https://api.flutterwave.com/v3/beneficiaries',
+//                 {
+//                     account_bank: user.bankCode,
+//                     account_number: user.accountNumber,
+//                     beneficiary_name: user.accountName,
+//                     currency: 'NGN',
+//                     bank_name: user.bankName
+//                 },
+//                 {
+//                     headers: {
+//                         'Authorization': `Bearer ${secretKey}`,
+//                         'Content-Type': 'application/json'
+//                     }
+//                 }
+//             );
+            
+//             if (beneficiaryRes.data.status === 'success') {
+//                 beneficiaryId = beneficiaryRes.data.data.id;
+//                 console.log('✅ Beneficiary created:', beneficiaryId);
+//             }
+//         } catch (createError) {
+//             if (createError.response?.data?.message === 'Beneficiary already added to your account') {
+//                 console.log('📡 Beneficiary already exists, fetching ID...');
+                
+//                 try {
+//                     const listRes = await axios.get(
+//                         'https://api.flutterwave.com/v3/beneficiaries',
+//                         {
+//                             headers: {
+//                                 'Authorization': `Bearer ${secretKey}`,
+//                                 'Content-Type': 'application/json'
+//                             }
+//                         }
+//                     );
+                    
+//                     const existing = listRes.data.data?.find(b => 
+//                         b.account_number === user.accountNumber && 
+//                         b.bank_code === user.bankCode
+//                     );
+                    
+//                     if (existing) {
+//                         beneficiaryId = existing.id;
+//                         console.log('✅ Found existing beneficiary:', beneficiaryId);
+//                     } else if (listRes.data.data && listRes.data.data.length > 0) {
+//                         beneficiaryId = listRes.data.data[0].id;
+//                         console.log('✅ Using first available beneficiary:', beneficiaryId);
+//                     } else {
+//                         throw new Error('No beneficiaries found');
+//                     }
+//                 } catch (listError) {
+//                     console.error('❌ Error fetching beneficiaries:', listError.response?.data || listError.message);
+//                     throw listError;
+//                 }
+//             } else {
+//                 throw createError;
+//             }
+//         }
+        
+//         if (!beneficiaryId) {
+//             throw new Error('Could not get beneficiary ID');
+//         }
+        
+//         // ============ CREATE TRANSFER - CORRECT V3 FORMAT ============
+//         console.log('📡 Creating transfer with beneficiary ID:', beneficiaryId);
+        
+//         const transferRes = await axios.post(
+//             'https://api.flutterwave.com/v3/transfers',
+//             {
+//                 amount: request.amount,
+//                 currency: 'NGN',
+//                 beneficiary: beneficiaryId,
+//                 reference: reference,
+//                 narration: `TheSpark withdrawal - ${user.accountName}`
+//             },
+//             {
+//                 headers: {
+//                     'Authorization': `Bearer ${secretKey}`,
+//                     'Content-Type': 'application/json'
+//                 }
+//             }
+//         );
+        
+//         console.log('✅ Transfer initiated:', transferRes.data.status);
+//         console.log('   Transfer Reference:', transferRes.data.data?.reference);
+        
+//         if (transferRes.data.status === 'success') {
+//             // ✅ Update user balance (deduct amount + fee)
+//             await userRef.update({
+//                 currentBalance: admin.firestore.FieldValue.increment(-totalDeduction),
+//                 totalWithdrawn: admin.firestore.FieldValue.increment(request.amount)
+//             });
+//             console.log('✅ User balance updated (deducted: ₦' + totalDeduction + ')');
+            
+//             // Update request status
+//             await requestRef.update({
+//                 status: 'approved',
+//                 processedAt: new Date(),
+//                 processedBy: adminId,
+//                 transferReference: reference
+//             });
+//             console.log('✅ Withdrawal request updated');
+            
+//             // ✅ Record transaction with fee details
+//             await db.collection('transactions').add({
+//                 userId: request.userId,
+//                 type: 'withdrawal',
+//                 amount: request.amount,
+//                 fee: feeDetails.fee,
+//                 totalFee: feeDetails.totalFee,
+//                 totalDeduction: totalDeduction,
+//                 cycle: request.cycle,
+//                 day: request.requestDay,
+//                 balanceAfter: user.currentBalance - totalDeduction,
+//                 transferReference: reference,
+//                 createdAt: admin.firestore.FieldValue.serverTimestamp()
+//             });
+//             console.log('✅ Transaction recorded');
+            
+//             // ✅ Send notification to user
+//             await createNotification(
+//                 request.userId,
+//                 '✅ Withdrawal Approved',
+//                 `Your withdrawal of ₦${request.amount.toLocaleString()} has been approved and is being processed. Fee: ₦${feeDetails.fee.toLocaleString()}`,
+//                 'withdrawal_approved'
+//             );
+            
+//             res.json({ 
+//                 success: true, 
+//                 message: 'Withdrawal approved', 
+//                 reference: reference 
+//             });
+//         } else {
+//             throw new Error(transferRes.data.message || 'Transfer failed');
+//         }
+        
+//     } catch (error) {
+//         console.error('❌ Withdrawal error details:');
+//         console.error('   Status:', error.response?.status);
+//         console.error('   Message:', error.response?.data?.message || error.message);
+//         console.error('   Full response:', JSON.stringify(error.response?.data, null, 2));
+        
+//         // ===== GET BOTH ERRORS =====
+//         const technicalError = error.response?.data?.message || error.message;
+//         const flutterwaveResponse = error.response?.data || null;
+//         const statusCode = error.response?.status || null;
+        
+//         let userMessage = technicalError;
+        
+//         // Make error more user-friendly
+//         if (userMessage.includes('insufficient balance')) {
+//             userMessage = 'Insufficient balance in merchant account. Please contact support.';
+//         } else if (userMessage.includes('beneficiary')) {
+//             userMessage = 'Beneficiary account issue. Please verify your bank details.';
+//         } else if (userMessage.includes('bank')) {
+//             userMessage = 'Bank transfer failed. Please check your bank details.';
+//         } else if (userMessage.includes('This request cannot be processed')) {
+//             userMessage = 'This request cannot be processed. Please contact support.';
+//         } else if (userMessage.includes('secret key') || userMessage.includes('FLW_SECRET_KEY')) {
+//             userMessage = 'Payment service configuration error. Please contact support.';
+//         }
+        
+//         // ✅ Send failure notification to user (using the outer request variable)
+//         try {
+//             if (request && request.userId) {
+//                 await createNotification(
+//                     request.userId,
+//                     '❌ Withdrawal Failed',
+//                     `Your withdrawal of ₦${request.amount ? request.amount.toLocaleString() : 'unknown'} failed. Error: ${userMessage}. Please try again later.`,
+//                     'withdrawal_failed'
+//                 );
+//             }
+//         } catch (notifyError) {
+//             console.error('Failed to send notification:', notifyError);
+//         }
+        
+//         // ✅ NEW: Notify ALL admins that a withdrawal failed and needs attention
+//                 // ✅ NEW: Notify ALL admins that a withdrawal failed and needs attention
+//         try {
+//             const adminsSnap = await db.collection('users')
+//                 .where('role', '==', 'admin')
+//                 .get();
+
+//             // ✅ Look up the user's display name for a friendlier message
+//             let userDisplayName = request?.userId || 'Unknown User';
+//             try {
+//                 if (request?.userId) {
+//                     const failedUserDoc = await db.collection('users').doc(request.userId).get();
+//                     if (failedUserDoc.exists) {
+//                         const failedUser = failedUserDoc.data();
+//                         userDisplayName = failedUser.fullName || failedUser.email || request.userId;
+//                     }
+//                 }
+//             } catch (lookupErr) {
+//                 console.error('Failed to look up user name for notification:', lookupErr);
+//             }
+
+//             const failureNotificationMessage = request
+//                 ? `Withdrawal of ₦${(request.amount || 0).toLocaleString()} failed for ${userDisplayName}. Reason: ${userMessage}. Check failed withdrawals to retry.`
+//                 : `A withdrawal failed. Reason: ${userMessage}. Check failed withdrawals to retry.`;
+
+//             for (const adminDoc of adminsSnap.docs) {
+//                 await createNotification(
+//                     adminDoc.id,
+//                     '⚠️ Withdrawal Failed',
+//                     failureNotificationMessage,
+//                     'admin_withdrawal_failed'
+//                 );
+//             }
+
+//             console.log(`📢 Notified ${adminsSnap.size} admin(s) of withdrawal failure`);
+//         } catch (notifyAdminsError) {
+//             console.error('Failed to notify admins:', notifyAdminsError);
+//         }
+        
+//         // ✅ Save BOTH errors to the database
+//         try {
+//             if (requestRef) {
+//                 await requestRef.update({
+//                     status: 'failed',
+//                     error: userMessage,  // User-friendly (shown in UI)
+//                     technicalError: technicalError,  // Technical (for admin debugging)
+//                     flutterwaveResponse: flutterwaveResponse,  // Full Flutterwave response
+//                     statusCode: statusCode,  // HTTP status code
+//                     processedAt: new Date(),
+//                     processedBy: adminId
+//                 });
+//             }
+//         } catch (updateError) {
+//             console.error('Failed to update request status:', updateError);
+//         }
+        
+//         res.status(500).json({ 
+//             error: 'Failed to process withdrawal', 
+//             details: userMessage,
+//             technicalDetails: technicalError
+//         });
+//     }
+// });
+
+// ============ WITHDRAWAL SETTINGS ============
+
+// GET withdrawal settings
+router.get('/withdrawal-settings', async (req, res) => {
+    try {
+        const doc = await db.collection('adminSettings').doc('settings').get();
+        const data = doc.exists ? doc.data() : {};
+
+        const minWithdrawalAmount =
+            data.minWithdrawalAmount === null || data.minWithdrawalAmount === undefined
+                ? null
+                : Number(data.minWithdrawalAmount);
+
+        const autoApproveThreshold =
+            data.autoApproveThreshold === null || data.autoApproveThreshold === undefined
+                ? null
+                : Number(data.autoApproveThreshold);
+
+        res.json({
+            minWithdrawalAmount,
+            autoApproveThreshold
+        });
+    } catch (error) {
+        console.error('Error fetching withdrawal settings:', error);
+        res.status(500).json({ error: 'Failed to fetch withdrawal settings' });
+    }
+});
+
+// UPDATE withdrawal settings
+router.put('/withdrawal-settings', async (req, res) => {
+    const { minWithdrawalAmount, autoApproveThreshold } = req.body;
+
+    try {
+        // Accept null to clear a setting, or a number to set it
+        const normalize = (value, label) => {
+            if (value === null || value === undefined || value === '') return null;
+            const parsed = Number(value);
+            if (!Number.isFinite(parsed) || parsed < 0) {
+                throw new Error(`${label} must be a positive number or left empty`);
+            }
+            return parsed;
+        };
+
+        const newMin = normalize(minWithdrawalAmount, 'Minimum withdrawal amount');
+        const newThreshold = normalize(autoApproveThreshold, 'Auto-approve threshold');
+
+        // Sanity: if both set, threshold must be >= min (otherwise min is unreachable)
+        if (newMin !== null && newThreshold !== null && newThreshold < newMin) {
+            return res.status(400).json({
+                error: 'Auto-approve threshold must be greater than or equal to the minimum withdrawal amount'
+            });
+        }
+
+        const updateData = {
+            withdrawalSettingsUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            withdrawalSettingsUpdatedBy: req.user.uid
+        };
+        updateData.minWithdrawalAmount = newMin;
+        updateData.autoApproveThreshold = newThreshold;
+
+        await db.collection('adminSettings').doc('settings').set(updateData, { merge: true });
+
+        res.json({
+            success: true,
+            minWithdrawalAmount: newMin,
+            autoApproveThreshold: newThreshold
+        });
+    } catch (error) {
+        console.error('Error updating withdrawal settings:', error);
+        res.status(400).json({ error: error.message || 'Failed to update withdrawal settings' });
+    }
+});
+
+// ============ ADMIN: APPROVE WITHDRAWAL ============
 router.post('/withdrawals/:requestId/approve', async (req, res) => {
     const { requestId } = req.params;
     const adminId = req.user.uid;
-    const axios = require('axios');
-    
-    // ✅ Declare variables OUTSIDE try block so they're accessible in catch
-    let request = null;
-    let requestRef = null;
-    let user = null;
-    let userRef = null;
-    let feeDetails = null;
-    let totalDeduction = 0;
-    
+
     try {
-        // 1. Check admin
-        const adminDoc = await db.collection('users').doc(adminId).get();
-        if (!adminDoc.exists || adminDoc.data().role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
-        }
-        
-        // 2. Get withdrawal request
-        requestRef = db.collection('withdrawalRequests').doc(requestId);
-        const requestDoc = await requestRef.get();
-        
-        if (!requestDoc.exists) {
-            return res.status(404).json({ error: 'Request not found' });
-        }
-        
-        request = requestDoc.data();
-        
-        if (request.status !== 'pending') {
-            return res.status(400).json({ error: 'Request already processed' });
-        }
-        
-        // 3. Get user - ✅ CHECK IF USER EXISTS
-        userRef = db.collection('users').doc(request.userId);
-        const userDoc = await userRef.get();
-        
-        if (!userDoc.exists) {
-            console.log(`❌ User ${request.userId} not found for withdrawal ${requestId}`);
-            await requestRef.update({
-                status: 'rejected',
-                reason: 'User account no longer exists',
-                processedAt: new Date(),
-                processedBy: adminId
-            });
-            return res.status(400).json({ error: 'User account no longer exists' });
-        }
-        
-        user = userDoc.data();
-        
-        // ✅ Calculate fee using imported function
-        feeDetails = calculateWithdrawalFee(request.amount);
-        totalDeduction = request.amount + feeDetails.totalFee;
-        
-        if (totalDeduction > user.currentBalance) {
-            await requestRef.update({
-                status: 'rejected',
-                reason: 'Insufficient balance',
-                processedAt: new Date(),
-                processedBy: adminId
-            });
-            
-            // ===== ✅ ADDED: Send rejection notification for insufficient balance =====
-            await createNotification(
-                request.userId,
-                '❌ Withdrawal Rejected',
-                `Your withdrawal of ₦${request.amount.toLocaleString()} was rejected due to insufficient balance.`,
-                'withdrawal_rejected'
-            );
-            // ===== END ADDED =====
-            
-            return res.status(400).json({ error: 'Insufficient balance' });
-        }
-        
-        if (!user.bankCode || !user.accountNumber) {
-            await requestRef.update({
-                status: 'rejected',
-                reason: 'No bank account',
-                processedAt: new Date(),
-                processedBy: adminId
-            });
-            
-            // ===== ✅ ADDED: Send rejection notification for no bank account =====
-            await createNotification(
-                request.userId,
-                '❌ Withdrawal Rejected',
-                `Your withdrawal of ₦${request.amount.toLocaleString()} was rejected because you don't have a bank account set up. Please add your bank details.`,
-                'withdrawal_rejected'
-            );
-            // ===== END ADDED =====
-            
-            return res.status(400).json({ error: 'User has no bank account' });
-        }
-        
-        const secretKey = process.env.FLW_SECRET_KEY;
-        
-        if (!secretKey) {
-            throw new Error('FLW_SECRET_KEY not configured in .env');
-        }
-        
-        console.log('📡 Using FLW_SECRET_KEY for withdrawal');
-        console.log('   Bank Code:', user.bankCode);
-        console.log('   Bank Name:', user.bankName);
-        console.log('   Account:', user.accountNumber);
-        console.log('   Amount: ₦' + request.amount);
-        console.log('   Fee: ₦' + feeDetails.fee);
-        console.log('   Total Deduction: ₦' + totalDeduction);
-        console.log('   Account Name:', user.accountName);
-        
-        const reference = `WTH${Date.now()}${request.userId.slice(0, 8)}`;
-        
-        // ============ GET OR CREATE BENEFICIARY ============
-        let beneficiaryId = null;
-        
-        console.log('📡 Creating beneficiary...');
-        
-        try {
-            const beneficiaryRes = await axios.post(
-                'https://api.flutterwave.com/v3/beneficiaries',
-                {
-                    account_bank: user.bankCode,
-                    account_number: user.accountNumber,
-                    beneficiary_name: user.accountName,
-                    currency: 'NGN',
-                    bank_name: user.bankName
-                },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${secretKey}`,
-                        'Content-Type': 'application/json'
-                    }
-                }
-            );
-            
-            if (beneficiaryRes.data.status === 'success') {
-                beneficiaryId = beneficiaryRes.data.data.id;
-                console.log('✅ Beneficiary created:', beneficiaryId);
-            }
-        } catch (createError) {
-            if (createError.response?.data?.message === 'Beneficiary already added to your account') {
-                console.log('📡 Beneficiary already exists, fetching ID...');
-                
-                try {
-                    const listRes = await axios.get(
-                        'https://api.flutterwave.com/v3/beneficiaries',
-                        {
-                            headers: {
-                                'Authorization': `Bearer ${secretKey}`,
-                                'Content-Type': 'application/json'
-                            }
-                        }
-                    );
-                    
-                    const existing = listRes.data.data?.find(b => 
-                        b.account_number === user.accountNumber && 
-                        b.bank_code === user.bankCode
-                    );
-                    
-                    if (existing) {
-                        beneficiaryId = existing.id;
-                        console.log('✅ Found existing beneficiary:', beneficiaryId);
-                    } else if (listRes.data.data && listRes.data.data.length > 0) {
-                        beneficiaryId = listRes.data.data[0].id;
-                        console.log('✅ Using first available beneficiary:', beneficiaryId);
-                    } else {
-                        throw new Error('No beneficiaries found');
-                    }
-                } catch (listError) {
-                    console.error('❌ Error fetching beneficiaries:', listError.response?.data || listError.message);
-                    throw listError;
-                }
-            } else {
-                throw createError;
-            }
-        }
-        
-        if (!beneficiaryId) {
-            throw new Error('Could not get beneficiary ID');
-        }
-        
-        // ============ CREATE TRANSFER - CORRECT V3 FORMAT ============
-        console.log('📡 Creating transfer with beneficiary ID:', beneficiaryId);
-        
-        const transferRes = await axios.post(
-            'https://api.flutterwave.com/v3/transfers',
-            {
-                amount: request.amount,
-                currency: 'NGN',
-                beneficiary: beneficiaryId,
-                reference: reference,
-                narration: `TheSpark withdrawal - ${user.accountName}`
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${secretKey}`,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-        
-        console.log('✅ Transfer initiated:', transferRes.data.status);
-        console.log('   Transfer Reference:', transferRes.data.data?.reference);
-        
-        if (transferRes.data.status === 'success') {
-            // ✅ Update user balance (deduct amount + fee)
-            await userRef.update({
-                currentBalance: admin.firestore.FieldValue.increment(-totalDeduction),
-                totalWithdrawn: admin.firestore.FieldValue.increment(request.amount)
-            });
-            console.log('✅ User balance updated (deducted: ₦' + totalDeduction + ')');
-            
-            // Update request status
-            await requestRef.update({
-                status: 'approved',
-                processedAt: new Date(),
-                processedBy: adminId,
-                transferReference: reference
-            });
-            console.log('✅ Withdrawal request updated');
-            
-            // ✅ Record transaction with fee details
-            await db.collection('transactions').add({
-                userId: request.userId,
-                type: 'withdrawal',
-                amount: request.amount,
-                fee: feeDetails.fee,
-                totalFee: feeDetails.totalFee,
-                totalDeduction: totalDeduction,
-                cycle: request.cycle,
-                day: request.requestDay,
-                balanceAfter: user.currentBalance - totalDeduction,
-                transferReference: reference,
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-            console.log('✅ Transaction recorded');
-            
-            // ✅ Send notification to user
-            await createNotification(
-                request.userId,
-                '✅ Withdrawal Approved',
-                `Your withdrawal of ₦${request.amount.toLocaleString()} has been approved and is being processed. Fee: ₦${feeDetails.fee.toLocaleString()}`,
-                'withdrawal_approved'
-            );
-            
-            res.json({ 
-                success: true, 
-                message: 'Withdrawal approved', 
-                reference: reference 
-            });
-        } else {
-            throw new Error(transferRes.data.message || 'Transfer failed');
-        }
-        
-    } catch (error) {
-        console.error('❌ Withdrawal error details:');
-        console.error('   Status:', error.response?.status);
-        console.error('   Message:', error.response?.data?.message || error.message);
-        console.error('   Full response:', JSON.stringify(error.response?.data, null, 2));
-        
-        // ===== GET BOTH ERRORS =====
-        const technicalError = error.response?.data?.message || error.message;
-        const flutterwaveResponse = error.response?.data || null;
-        const statusCode = error.response?.status || null;
-        
-        let userMessage = technicalError;
-        
-        // Make error more user-friendly
-        if (userMessage.includes('insufficient balance')) {
-            userMessage = 'Insufficient balance in merchant account. Please contact support.';
-        } else if (userMessage.includes('beneficiary')) {
-            userMessage = 'Beneficiary account issue. Please verify your bank details.';
-        } else if (userMessage.includes('bank')) {
-            userMessage = 'Bank transfer failed. Please check your bank details.';
-        } else if (userMessage.includes('This request cannot be processed')) {
-            userMessage = 'This request cannot be processed. Please contact support.';
-        } else if (userMessage.includes('secret key') || userMessage.includes('FLW_SECRET_KEY')) {
-            userMessage = 'Payment service configuration error. Please contact support.';
-        }
-        
-        // ✅ Send failure notification to user (using the outer request variable)
-        try {
-            if (request && request.userId) {
-                await createNotification(
-                    request.userId,
-                    '❌ Withdrawal Failed',
-                    `Your withdrawal of ₦${request.amount ? request.amount.toLocaleString() : 'unknown'} failed. Error: ${userMessage}. Please try again later.`,
-                    'withdrawal_failed'
-                );
-            }
-        } catch (notifyError) {
-            console.error('Failed to send notification:', notifyError);
-        }
-        
-        // ✅ Save BOTH errors to the database
-        try {
-            if (requestRef) {
-                await requestRef.update({
-                    status: 'failed',
-                    error: userMessage,  // User-friendly (shown in UI)
-                    technicalError: technicalError,  // Technical (for admin debugging)
-                    flutterwaveResponse: flutterwaveResponse,  // Full Flutterwave response
-                    statusCode: statusCode,  // HTTP status code
-                    processedAt: new Date(),
-                    processedBy: adminId
-                });
-            }
-        } catch (updateError) {
-            console.error('Failed to update request status:', updateError);
-        }
-        
-        res.status(500).json({ 
-            error: 'Failed to process withdrawal', 
-            details: userMessage,
-            technicalDetails: technicalError
+        const result = await executeWithdrawal({
+            requestId,
+            actorId: adminId,
+            actorType: 'admin'
         });
+
+        if (result.success) {
+            return res.json({
+                success: true,
+                message: 'Withdrawal approved',
+                reference: result.reference
+            });
+        }
+
+        // Map reasons to HTTP statuses
+        const statusMap = {
+            not_found: 404,
+            already_processed: 400,
+            user_missing: 400,
+            insufficient_user_balance: 400,
+            no_bank_account: 400,
+            flutterwave_error: 500
+        };
+
+        return res.status(statusMap[result.reason] || 500).json({
+            error: result.error || 'Failed to process withdrawal',
+            details: result.error,
+            technicalDetails: result.technicalError
+        });
+    } catch (error) {
+        console.error('Error in withdrawal approval route:', error);
+        res.status(500).json({ error: 'Failed to approve withdrawal' });
     }
 });
 
@@ -1378,13 +1532,42 @@ router.post('/withdrawals/:requestId/retry', async (req, res) => {
 });
 
 // DELETE failed withdrawal
+// DELETE failed withdrawal — soft delete, refuses unrefunded failed requests
 router.delete('/withdrawals/:requestId', authenticate, isAdmin, async (req, res) => {
     const { requestId } = req.params;
-    
+    const adminId = req.user.uid;
+
     try {
-        await db.collection('withdrawalRequests').doc(requestId).delete();
+        const docRef = db.collection('withdrawalRequests').doc(requestId);
+        const doc = await docRef.get();
+
+        if (!doc.exists) {
+            return res.status(404).json({ error: 'Request not found' });
+        }
+
+        const data = doc.data();
+
+        // Refuse to delete a failed withdrawal that was never refunded
+        if (data.status === 'failed' && data.debitedAt != null && data.refunded !== true) {
+            return res.status(400).json({
+                error: 'Cannot delete: this failed withdrawal was never refunded. Refund the user first.',
+                userId: data.userId,
+                amount: data.amount,
+                totalDeduction: data.totalDeduction
+            });
+        }
+
+        // Soft delete — preserves audit trail forever
+        await docRef.update({
+            status: 'deleted',
+            deleted: true,
+            deletedAt: new Date(),
+            deletedBy: adminId
+        });
+
         res.json({ success: true });
     } catch (error) {
+        console.error('Error deleting withdrawal:', error);
         res.status(500).json({ error: 'Failed to delete' });
     }
 });
@@ -1717,6 +1900,85 @@ router.get('/flagged-deposits/:id', async (req, res) => {
     }
 });
 
+// GET all rejected deposits (plan limit, daily limit, etc.)
+router.get('/rejected-deposits', async (req, res) => {
+    try {
+        const snapshot = await db.collection('rejectedDeposits').get();
+
+        const rejected = [];
+        snapshot.forEach(doc => {
+            rejected.push({ id: doc.id, ...doc.data() });
+        });
+
+        // Sort manually by createdAt (newest first) — same pattern as your other endpoints
+        rejected.sort((a, b) => {
+            const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
+            const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
+            return dateB - dateA;
+        });
+
+        res.json(rejected);
+    } catch (error) {
+        console.error('Error fetching rejected deposits:', error);
+        res.status(500).json({ error: 'Failed to fetch rejected deposits' });
+    }
+});
+
+// GET all orphan payments (webhook fired for email with no user)
+router.get('/orphan-payments', async (req, res) => {
+    try {
+        const snapshot = await db.collection('orphanPayments').get();
+
+        const orphan = [];
+        snapshot.forEach(doc => {
+            orphan.push({ id: doc.id, ...doc.data() });
+        });
+
+        // Sort manually by createdAt (newest first)
+        orphan.sort((a, b) => {
+            const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
+            const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
+            return dateB - dateA;
+        });
+
+        res.json(orphan);
+    } catch (error) {
+        console.error('Error fetching orphan payments:', error);
+        res.status(500).json({ error: 'Failed to fetch orphan payments' });
+    }
+});
+
+// GET combined "needs attention" view (all three collections in one call)
+router.get('/failed-payments', async (req, res) => {
+    try {
+        const [flaggedSnap, rejectedSnap, orphanSnap] = await Promise.all([
+            db.collection('flaggedDeposits').get(),
+            db.collection('rejectedDeposits').get(),
+            db.collection('orphanPayments').get()
+        ]);
+
+        const toArray = (snap, source) => {
+            const arr = [];
+            snap.forEach(doc => arr.push({ id: doc.id, _source: source, ...doc.data() }));
+            arr.sort((a, b) => {
+                const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
+                const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
+                return dateB - dateA;
+            });
+            return arr;
+        };
+
+        res.json({
+            flagged: toArray(flaggedSnap, 'flagged'),
+            rejected: toArray(rejectedSnap, 'rejected'),
+            orphan: toArray(orphanSnap, 'orphan')
+        });
+    } catch (error) {
+        console.error('Error fetching failed payments:', error);
+        res.status(500).json({ error: 'Failed to fetch failed payments' });
+    }
+});
+
 // ✅ FIXED: Added try/catch
 router.get('/stats', async (req, res) => {
     try {
@@ -1750,6 +2012,93 @@ router.get('/stats', async (req, res) => {
     } catch (error) {
         console.error('Error fetching stats:', error);
         res.status(500).json({ error: 'Failed to fetch stats' });
+    }
+});
+
+// ============ FLUTTERWAVE MERCHANT BALANCE ============
+
+// Returns the available and ledger NGN balance from Flutterwave's merchant wallet.
+// Used by the admin Overview tab so admins know if there's enough liquidity to approve withdrawals.
+router.get('/flutterwave-balance', async (req, res) => {
+    const axios = require('axios');
+
+    try {
+        const secretKey = process.env.FLW_SECRET_KEY;
+        if (!secretKey) {
+            console.error('❌ FLW_SECRET_KEY not configured');
+            return res.status(500).json({ error: 'Flutterwave not configured' });
+        }
+
+        // Flutterwave v3 endpoint for NGN balance
+        const response = await axios.get(
+            'https://api.flutterwave.com/v3/balances/NGN',
+            {
+                headers: {
+                    'Authorization': `Bearer ${secretKey}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000
+            }
+        );
+
+        if (response.data.status !== 'success') {
+            console.error('❌ Flutterwave balance error:', response.data.message);
+            return res.status(500).json({
+                error: response.data.message || 'Failed to fetch Flutterwave balance'
+            });
+        }
+
+        const balanceData = response.data.data || {};
+
+        // Also compute total pending withdrawals so the admin knows the liability
+        const pendingSnap = await db.collection('withdrawalRequests')
+            .where('status', '==', 'pending')
+            .get();
+        let pendingTotal = 0;
+        pendingSnap.forEach(doc => {
+            pendingTotal += doc.data().amount || 0;
+        });
+
+        // And failed withdrawals whose reason mentions insufficient balance
+        const failedSnap = await db.collection('withdrawalRequests')
+            .where('status', '==', 'failed')
+            .get();
+        let failedInsufficientTotal = 0;
+        let failedInsufficientCount = 0;
+        failedSnap.forEach(doc => {
+            const d = doc.data();
+            const msg = (d.error || d.technicalError || '').toLowerCase();
+            if (msg.includes('insufficient balance')) {
+                failedInsufficientTotal += d.amount || 0;
+                failedInsufficientCount++;
+            }
+        });
+
+        res.json({
+            available: balanceData.available_balance || 0,
+            ledger: balanceData.ledger_balance || 0,
+            currency: 'NGN',
+            pendingWithdrawals: {
+                count: pendingSnap.size,
+                total: pendingTotal,
+            },
+            failedInsufficient: {
+                count: failedInsufficientCount,
+                total: failedInsufficientTotal,
+            },
+            // Helpful booleans for the UI
+            canCoverPending: (balanceData.available_balance || 0) >= pendingTotal,
+            shortfall: Math.max(0, pendingTotal - (balanceData.available_balance || 0)),
+        });
+    } catch (error) {
+        console.error('❌ Error fetching Flutterwave balance:',
+            error.response?.status,
+            error.response?.data || error.message
+        );
+        res.status(500).json({
+            error: error.response?.data?.message || 'Failed to fetch Flutterwave balance',
+            statusCode: error.response?.status || null
+        });
     }
 });
 
