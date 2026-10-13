@@ -2,6 +2,12 @@
 const admin = require('firebase-admin');
 const dotenv = require('dotenv');
 const REFERRAL_CONSTANTS = require('../utils/referralConstants.cjs');
+const {
+    getPlanInterestRate,
+    getPlanMonthlyFee,
+    getPlanLimits,
+    getPlanDurationDays,      // ✅ NEW
+} = require('../utils/planLimits');
 
 dotenv.config();
 
@@ -35,11 +41,10 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 // ============================================================
-// ✅ NEW: Determine the interest rate for a given user.
+// ✅ Determine the interest rate for a given user.
 // Priority:
 //   1. user.premiumInterestRate (explicit, set per user)
-//   2. Plan-name mapping (fallback if rate field missing)
-//   3. Default 5% (Basic rate)
+//   2. Plan-based fallback — read from planLimits.js
 // ============================================================
 function getUserInterestRate(user) {
     // 1. Explicit rate on the user document
@@ -47,21 +52,16 @@ function getUserInterestRate(user) {
         return user.premiumInterestRate;
     }
 
-    // 2. Plan-based fallback
-    switch (user.premiumPlan) {
-        case 'Investor': return 3;
-        case 'Premium':  return 4;
-        case 'Basic':
-        default:         return 5;
-    }
+    // 2. Plan-based fallback — read from planLimits.js
+    return getPlanInterestRate(user.premiumPlan);
 }
 
 async function calculateAndPayInterest(userId, cycle, avgDays1to16, totalSavedDays1to16, interestRatePercent) {
-    // ✅ FIX: Use the caller-provided rate (per user), fall back to 5%
+    // ✅ Use the caller-provided rate (per user), fall back to Basic plan rate
     const ratePercent =
         typeof interestRatePercent === 'number' && interestRatePercent > 0
             ? interestRatePercent
-            : 5;
+            : getPlanInterestRate('Basic');
 
     const rateDecimal = ratePercent / 100;
     const interest = avgDays1to16 * rateDecimal;
@@ -106,7 +106,10 @@ async function calculateAndPayInterest(userId, cycle, avgDays1to16, totalSavedDa
     // 4. Update admin cumulative interest
     const adminRef = db.collection('adminSettings').doc('settings');
     const adminDoc = await adminRef.get();
-    const cumulative = (adminDoc.exists ? adminDoc.data().cumulativeInterestPaid : 0) + interest;
+    const existingCumulative = adminDoc.exists ? adminDoc.data().cumulativeInterestPaid : 0;
+    // ✅ FIX: guard against NaN propagation — if existing value is NaN, treat it as 0
+    const cumulative = (Number.isFinite(existingCumulative) ? existingCumulative : 0) + interest;
+
     await adminRef.set({ cumulativeInterestPaid: cumulative }, { merge: true });
 
     return interest;
@@ -158,8 +161,138 @@ async function payReferralBonus(userId) {
     }
 }
 
+// ============================================================
+// ✅ Charge premium plan renewals
+// Runs daily. For any Premium/Investor user whose plan
+// expired, deduct the fee from their balance and extend
+// by 30 days (monthly) or 365 days (yearly).
+// If balance is too low, downgrade to Basic.
+// ============================================================
+async function processPremiumRenewals() {
+    console.log('💳 Processing premium plan renewals...');
+
+    const now = new Date();
+    const usersSnapshot = await db.collection('users')
+        .where('premiumPlan', 'in', ['Premium', 'Investor'])
+        .get();
+
+    let renewed = 0;
+    let downgraded = 0;
+    let skipped = 0;
+
+    for (const userDoc of usersSnapshot.docs) {
+        const user = userDoc.data();
+        const userId = userDoc.id;
+
+        // Parse expiry (supports Firestore Timestamp, {seconds}, {_seconds}, ISO string)
+        const rawExpires = user.premiumExpiresAt;
+        let expiresAt = null;
+        if (rawExpires) {
+            if (typeof rawExpires.toDate === 'function') {
+                expiresAt = rawExpires.toDate();
+            } else if (rawExpires._seconds) {
+                expiresAt = new Date(rawExpires._seconds * 1000);
+            } else if (rawExpires.seconds) {
+                expiresAt = new Date(rawExpires.seconds * 1000);
+            } else {
+                const parsed = new Date(rawExpires);
+                if (!isNaN(parsed.getTime())) expiresAt = parsed;
+            }
+        }
+
+        // If no expiry yet (existing users before this feature), set one and skip this cycle
+        if (!expiresAt) {
+            // ✅ NEW: use the user's interval (defaults to monthly)
+            const fallbackDays = getPlanDurationDays(user.premiumBillingInterval || 'monthly');
+            const fallbackExpiry = new Date(now.getTime() + fallbackDays * 24 * 60 * 60 * 1000);
+            await userDoc.ref.update({
+                premiumExpiresAt: fallbackExpiry,
+                premiumMonthlyFee: user.premiumMonthlyFee || getPlanMonthlyFee(user.premiumPlan),
+                premiumBillingInterval: user.premiumBillingInterval || 'monthly'   // ✅ NEW
+            });
+            console.log(`ℹ️  Set missing premiumExpiresAt for ${userId} → ${fallbackExpiry.toISOString()}`);
+            skipped++;
+            continue;
+        }
+
+        // Not expired yet
+        if (expiresAt > now) {
+            skipped++;
+            continue;
+        }
+
+        const fee = user.premiumMonthlyFee || getPlanMonthlyFee(user.premiumPlan);
+        const currentBalance = user.currentBalance || 0;
+
+        if (currentBalance < fee) {
+            // Not enough balance → downgrade to Basic
+            await userDoc.ref.update({
+                premiumPlan: 'Basic',
+                premiumBillingInterval: 'monthly',    // ✅ NEW: reset interval
+                premiumInterestRate: getPlanInterestRate('Basic'),
+                premiumExpiresAt: null,
+                premiumMonthlyFee: 0,
+                premiumDowngradedAt: now,
+                premiumDowngradeReason: 'insufficient_balance',
+                dailySaveMax: getPlanLimits('Basic').max
+            });
+
+            await db.collection('notifications').add({
+                userId,
+                title: '⚠️ Premium Plan Expired',
+                message: `Your ${user.premiumPlan} plan expired because your balance (₦${currentBalance.toLocaleString()}) was less than the renewal fee (₦${fee.toLocaleString()}). You've been moved to Basic. Top up your balance and re-subscribe anytime.`,
+                type: 'premium_expired',
+                read: false,
+                createdAt: now
+            });
+
+            console.log(`⬇️  Downgraded ${userId} (balance ₦${currentBalance} < fee ₦${fee})`);
+            downgraded++;
+            continue;
+        }
+
+        // ✅ NEW: renew based on the user's billing interval
+        const renewalDays = getPlanDurationDays(user.premiumBillingInterval || 'monthly');
+        const newExpiresAt = new Date(now.getTime() + renewalDays * 24 * 60 * 60 * 1000);
+        const billingLabel = user.premiumBillingInterval === 'yearly' ? 'yearly' : 'monthly';   // ✅ NEW
+
+        await userDoc.ref.update({
+            currentBalance: admin.firestore.FieldValue.increment(-fee),
+            premiumExpiresAt: newExpiresAt,
+            premiumRenewedAt: now
+        });
+
+        await db.collection('transactions').add({
+            userId,
+            type: 'premium_fee',
+            amount: fee,
+            description: `${user.premiumPlan} plan — ${billingLabel} renewal`,   // ✅ NEW
+            billingInterval: billingLabel,                                       // ✅ NEW
+            renewsAt: newExpiresAt,
+            createdAt: now
+        });
+
+        await db.collection('notifications').add({
+            userId,
+            title: '✅ Premium Plan Renewed',
+            message: `Your ${user.premiumPlan} plan has been renewed for another ${billingLabel === 'yearly' ? 'year' : '30 days'}. ₦${fee.toLocaleString()} was deducted from your balance. Next renewal: ${newExpiresAt.toLocaleDateString()}.`,   // ✅ NEW
+            type: 'premium_renewed',
+            read: false,
+            createdAt: now
+        });
+
+        console.log(`✅ Renewed ${userId} for ₦${fee} (${billingLabel}, new expiry: ${newExpiresAt.toISOString()})`);
+        renewed++;
+    }
+
+    console.log(`💳 Premium renewals complete. Renewed: ${renewed}, Downgraded: ${downgraded}, Skipped: ${skipped}`);
+}
+
 async function dailyBalanceUpdate() {
     console.log(`[${new Date().toISOString()}] Starting daily balance update (Option B - Days 1-16 only)...`);
+
+    // ✅ Charge premium renewals before anything else
+    await processPremiumRenewals();
 
     const usersSnapshot = await db.collection('users')
         .where('isActive', '==', true)
@@ -233,7 +366,7 @@ async function dailyBalanceUpdate() {
             const avgDays1to16 = user.avgDays1to16 || 0;
             const totalSavedDays1to16 = user.totalSavedDays1to16 || 0;
 
-            // ✅ NEW: Determine this user's rate before paying
+            // ✅ Determine this user's rate before paying
             const userRate = getUserInterestRate(user);
 
             console.log(

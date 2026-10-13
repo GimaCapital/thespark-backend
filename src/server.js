@@ -47,7 +47,6 @@
 // app.listen(PORT, () => {
 //     console.log(`TheSpark backend running on port ${PORT}`);
 // });
-
 // C:\Users\HP\Desktop\TheSpark\thespark-backend\src\server.js
 const express = require('express');
 const cors = require('cors');
@@ -59,6 +58,7 @@ const depositRoutes = require('./routes/deposits');
 const withdrawalRoutes = require('./routes/withdrawals');
 const userRoutes = require('./routes/users');
 const adminRoutes = require('./routes/admin');
+const adminPlansRouter = require('./routes/adminPlans');
 const graduationRoutes = require('./routes/graduation');
 const successStoriesRoutes = require('./routes/successStories'); 
 const flutterwaveRoutes = require('./routes/flutterwave');
@@ -71,6 +71,9 @@ const aiRoutes = require('./routes/ai');
 // ✅ ADDED: cron handlers (used by the HTTP-triggered cron endpoints below)
 const { runDailyBalanceUpdate } = require('./cron/dailyBalanceUpdate');
 const { sendDailyMessages } = require('./cron/dailyMessages');
+
+// ✅ ADDED: plan cache loader (reads planConfigs from Firestore at startup)
+const { loadPlanCache } = require('./utils/planLimits');
 
 const app = express();
 
@@ -143,6 +146,7 @@ app.use('/api/deposits', depositRoutes);
 app.use('/api/withdrawals', withdrawalRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/plans', adminPlansRouter);
 app.use('/api/graduation', graduationRoutes);
 app.use('/api/success-stories', successStoriesRoutes);
 app.use('/api/flutterwave', flutterwaveRoutes); 
@@ -159,6 +163,19 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`TheSpark backend running on port ${PORT}`);
-});
+
+// ✅ Load plan configs from Firestore into memory BEFORE serving traffic.
+// This makes planLimits.js read from Firestore on every getter call.
+loadPlanCache()
+    .then(() => {
+        app.listen(PORT, () => {
+            console.log(`TheSpark backend running on port ${PORT}`);
+        });
+    })
+    .catch((err) => {
+        console.error('⚠️ Failed to load plan cache, starting server with defaults:', err.message);
+        // Still start — planLimits falls back to DEFAULT_PLANS internally
+        app.listen(PORT, () => {
+            console.log(`TheSpark backend running on port ${PORT} (defaults)`);
+        });
+    });

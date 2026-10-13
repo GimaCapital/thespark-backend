@@ -455,11 +455,19 @@
 // });
 
 // module.exports = router;
-
+// TheSpark\thespark-backend\src\routes\graduation.js
 const express = require('express');
 const { db } = require('../services/firebase');
 const { authenticate, isAdmin } = require('../middleware/auth');
 const admin = require('firebase-admin');
+
+const {
+    getAllPlans,
+    getPlanByName,
+    getPlanLevel,
+    getPlanFee,
+    getPlanDurationDays,
+} = require('../utils/planLimits');
 
 const router = express.Router();
 
@@ -478,16 +486,6 @@ const convertTimestamp = (timestamp) => {
         return new Date(timestamp.seconds * 1000).toISOString();
     }
     return timestamp;
-};
-
-// Get plan details
-const getPlanDetails = (planName) => {
-    const plans = {
-        Basic: { monthlyFee: 0, interestRate: 5, dailyMin: 100, dailyMax: 2000, level: 1, features: [] },
-        Premium: { monthlyFee: 1000, interestRate: 4, dailyMin: 500, dailyMax: 10000, level: 2, features: [] },
-        Investor: { monthlyFee: 2500, interestRate: 3, dailyMin: 1000, dailyMax: 20000, level: 3, features: [] }
-    };
-    return plans[planName];
 };
 
 // ============ CERTIFICATE ROUTES ============
@@ -634,160 +632,237 @@ router.get('/investments', authenticate, async (req, res) => {
 
 // ============ PREMIUM PLANS ROUTES ============
 
-// Get premium plans
-router.get('/premium-plans', authenticate, async (req, res) => {
-    const plans = [
-        { 
-            name: "Basic", 
-            monthlyFee: 0, 
-            interestRate: 5, 
-            dailyMin: 100, 
-            dailyMax: 2000,
-            bestFor: "Perfect for beginners",
-            features: [
-                    '✓ Graduate certificate after 8 cycles',
-                    '✓ Full access to wealth education library',
-                    '✓ Daily educational messages',
-                    '✓ 21-day cycle tracking',
-                    '✓ Progress dashboard',
-                    '✓ Referral program access',
-                    '✓ Community forum access',
-                    '✓ Basic email support',
-                    '✓ Cycle completion milestones'
-            ]
-        },
-        { 
-            name: "Premium", 
-            monthlyFee: 1000, 
-            interestRate: 4, 
-            dailyMin: 500, 
-            dailyMax: 10000,
-            bestFor: "For serious savers",
-            features: [
-                    '✓ Graduate certificate after 8 cycles',
-                    '✓ Priority support response (within 12 hours)',
-                    '✓ Private Premium WhatsApp community',
-                    '✓ Weekly live coaching calls',
-                    '✓ Exclusive video lessons',
-                    '✓ Downloadable worksheets',
-                    '✓ Goal-setting workshops',
-                    '✓ Monthly progress reports',
-                    '✓ Early access to new features',
-                    '✓ All Basic features included'
-            ]
-        },
-        { 
-            name: "Investor", 
-            monthlyFee: 2500, 
-            interestRate: 3, 
-            dailyMin: 1000, 
-            dailyMax: 20000,
-            bestFor: "For wealth builders",
-            features: [
-                    '✓ Graduate certificate after 8 cycles',
-                    '✓ Priority support response (within 6 hours)',
-                    '✓ Private Investor WhatsApp community',
-                    '✓ Weekly one-on-one coaching sessions',
-                    '✓ Exclusive advanced learning content',
-                    '✓ Investment education modules',
-                    '✓ Asset-building workshops',
-                    '✓ Real estate education',
-                    '✓ Business development resources',
-                    '✓ Quarterly strategy sessions',
-                    '✓ All Premium features included'
-            ]
-        }
-    ];
-    res.json(plans);
+// Get premium plans — PUBLIC endpoint (no auth required).
+// Pricing is marketing content that should be visible to everyone.
+router.get('/premium-plans', async (req, res) => {
+    res.json(getAllPlans());
 });
 
-// Upgrade or downgrade plan
+// Upgrade, downgrade, or switch plan — supports monthly AND yearly billing
 router.post('/premium/upgrade', authenticate, async (req, res) => {
-    const { planName } = req.body;
+    const { planName, billingInterval = 'monthly', idempotencyKey } = req.body;
     const userId = req.user.uid;
-    
-    const plans = {
-        Basic: { monthlyFee: 0, interestRate: 5, dailyMax: 2000, level: 1 },
-        Premium: { monthlyFee: 1000, interestRate: 4, dailyMax: 10000, level: 2 },
-        Investor: { monthlyFee: 2500, interestRate: 3, dailyMax: 20000, level: 3 }
-    };
-    
-    if (!plans[planName]) {
+
+    // Validate billing interval
+    if (!['monthly', 'yearly'].includes(billingInterval)) {
+        return res.status(400).json({ error: 'Invalid billing interval. Use "monthly" or "yearly".' });
+    }
+
+    const targetPlan = getPlanByName(planName);
+    if (!targetPlan) {
         return res.status(400).json({ error: 'Invalid plan' });
     }
-    
+
+    // ============================================================
+    // ✅ IDEMPOTENCY: if the same request key was already processed,
+    //    return the original response without charging twice.
+    // ============================================================
+    if (idempotencyKey) {
+        const idemRef = db.collection('upgradeIdempotency')
+            .doc(`${userId}_${idempotencyKey}`);
+        const idemSnap = await idemRef.get();
+        if (idemSnap.exists) {
+            console.log(`[upgrade] Idempotency hit: ${userId}/${idempotencyKey}`);
+            return res.json(idemSnap.data().response);
+        }
+    }
+
+    // ============================================================
+    // ✅ RATE LIMIT: block rapid-fire plan changes within 60 seconds.
+    // ============================================================
+    const recentTx = await db.collection('transactions')
+        .where('userId', '==', userId)
+        .where('type', 'in', ['premium_fee', 'plan_change'])
+        .orderBy('createdAt', 'desc')
+        .limit(1)
+        .get();
+
+    if (!recentTx.empty) {
+        const last = recentTx.docs[0].data();
+        const lastTime =
+            last.createdAt?.toDate?.() ??
+            (typeof last.createdAt?._seconds === 'number'
+                ? new Date(last.createdAt._seconds * 1000)
+                : typeof last.createdAt?.seconds === 'number'
+                ? new Date(last.createdAt.seconds * 1000)
+                : new Date(last.createdAt));
+
+        if (!isNaN(lastTime.getTime())) {
+            const secondsSince = (Date.now() - lastTime.getTime()) / 1000;
+            if (secondsSince < 60) {
+                const waitFor = Math.ceil(60 - secondsSince);
+                return res.status(429).json({
+                    error: `Please wait ${waitFor}s before changing plans again.`,
+                    retryAfter: waitFor,
+                });
+            }
+        }
+    }
+
     const userDoc = await db.collection('users').doc(userId).get();
     const user = userDoc.data();
-    const currentPlan = user.premiumPlan || 'Basic';
-    const targetPlan = plans[planName];
-    const currentPlanDetails = plans[currentPlan];
-    
+    const currentPlanName = user.premiumPlan || 'Basic';
+    const currentLevel = getPlanLevel(currentPlanName);
+
     // If same plan
-    if (currentPlan === planName) {
+    if (currentPlanName === planName) {
         return res.status(400).json({ error: `You are already on the ${planName} plan` });
     }
-    
-    // Handle UPGRADE (going to higher plan)
-    if (targetPlan.level > currentPlanDetails.level) {
-        const fee = targetPlan.monthlyFee;
-        
+
+    // ============================================================
+    // ✅ UPGRADE (moving to a higher tier)
+    // ============================================================
+    if (targetPlan.level > currentLevel) {
+        const fee = getPlanFee(planName, billingInterval);
+        const durationDays = getPlanDurationDays(billingInterval);
+
         if (user.currentBalance < fee) {
-            return res.status(400).json({ error: `Insufficient balance. Need ₦${fee.toLocaleString()} to upgrade to ${planName}` });
+            return res.status(400).json({
+                error: `Insufficient balance. Need ₦${fee.toLocaleString()} for ${billingInterval} billing of ${planName}.`
+            });
         }
-        
-        // Deduct fee
+
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
+
         await db.collection('users').doc(userId).update({
             currentBalance: admin.firestore.FieldValue.increment(-fee),
             premiumPlan: planName,
+            premiumBillingInterval: billingInterval,
             premiumInterestRate: targetPlan.interestRate,
-            premiumStartDate: new Date(),
+            premiumStartDate: now,
+            premiumExpiresAt: expiresAt,
+            premiumMonthlyFee: fee,
             premiumStatus: 'active',
-            dailySaveMax: targetPlan.dailyMax
+            dailySaveMax: targetPlan.dailySaveMax
         });
-        
-        // Record transaction
+
         await db.collection('transactions').add({
             userId,
             type: 'premium_fee',
             amount: fee,
-            description: `Upgraded from ${currentPlan} to ${planName} plan`,
-            createdAt: new Date()
+            description: `Upgraded from ${currentPlanName} to ${planName} plan — first ${billingInterval} period`,
+            billingInterval,
+            renewsAt: expiresAt,
+            createdAt: now
         });
-        
-        return res.json({ 
-            success: true, 
-            plan: planName, 
-            message: `Successfully upgraded to ${planName} plan! You now save up to ₦${targetPlan.dailyMax.toLocaleString()}/day and earn ${targetPlan.interestRate}% interest.`
-        });
+
+        const response = {
+            success: true,
+            plan: planName,
+            billingInterval,
+            renewsAt: expiresAt.toISOString(),
+            message: `Successfully upgraded to ${planName} plan (${billingInterval})! You now save up to ₦${targetPlan.max.toLocaleString()}/day and earn ${targetPlan.interestRate}% interest. Your plan renews on ${expiresAt.toLocaleDateString()} for ₦${fee.toLocaleString()}.`
+        };
+
+        // Save idempotency record
+        if (idempotencyKey) {
+            await db.collection('upgradeIdempotency')
+                .doc(`${userId}_${idempotencyKey}`)
+                .set({ response, createdAt: new Date() });
+        }
+
+        return res.json(response);
     }
-    
-    // Handle DOWNGRADE (going to lower plan)
-    if (targetPlan.level < currentPlanDetails.level) {
-        // No fee for downgrade
+
+    // ============================================================
+    // ✅ DOWNGRADE OR SWITCH (moving to a lower tier)
+    // ============================================================
+    if (targetPlan.level < currentLevel) {
+        const isTargetFree = targetPlan.monthlyFee === 0;
+
+        // --------------------------------------------------------
+        // CASE 1: Downgrade to a FREE plan (Basic)
+        // --------------------------------------------------------
+        if (isTargetFree) {
+            await db.collection('users').doc(userId).update({
+                premiumPlan: planName,
+                premiumBillingInterval: 'monthly',
+                premiumInterestRate: targetPlan.interestRate,
+                premiumEndDate: new Date(),
+                premiumExpiresAt: null,
+                premiumMonthlyFee: 0,
+                premiumStatus: 'downgraded',
+                dailySaveMax: targetPlan.dailySaveMax
+            });
+
+            await db.collection('transactions').add({
+                userId,
+                type: 'plan_change',
+                amount: 0,
+                description: `Downgraded from ${currentPlanName} to ${planName} plan`,
+                createdAt: new Date()
+            });
+
+            const response = {
+                success: true,
+                plan: planName,
+                message: `Downgraded to ${planName} plan. Your daily save limit is now ₦${targetPlan.max.toLocaleString()}/day with ${targetPlan.interestRate}% interest.`
+            };
+
+            if (idempotencyKey) {
+                await db.collection('upgradeIdempotency')
+                    .doc(`${userId}_${idempotencyKey}`)
+                    .set({ response, createdAt: new Date() });
+            }
+
+            return res.json(response);
+        }
+
+        // --------------------------------------------------------
+        // CASE 2: Switch to a LOWER PAID plan (e.g. Investor → Premium)
+        // --------------------------------------------------------
+        const fee = getPlanFee(planName, billingInterval);
+        const durationDays = getPlanDurationDays(billingInterval);
+
+        if (user.currentBalance < fee) {
+            return res.status(400).json({
+                error: `Insufficient balance. Need ₦${fee.toLocaleString()} to switch to ${planName} (${billingInterval}).`
+            });
+        }
+
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
+
         await db.collection('users').doc(userId).update({
+            currentBalance: admin.firestore.FieldValue.increment(-fee),
             premiumPlan: planName,
+            premiumBillingInterval: billingInterval,
             premiumInterestRate: targetPlan.interestRate,
-            premiumEndDate: new Date(),
-            premiumStatus: 'downgraded',
-            dailySaveMax: targetPlan.dailyMax
+            premiumStartDate: now,
+            premiumExpiresAt: expiresAt,
+            premiumMonthlyFee: fee,
+            premiumStatus: 'active',
+            dailySaveMax: targetPlan.dailySaveMax
         });
-        
-        // Record transaction
+
         await db.collection('transactions').add({
             userId,
-            type: 'plan_change',
-            amount: 0,
-            description: `Downgraded from ${currentPlan} to ${planName} plan`,
-            createdAt: new Date()
+            type: 'premium_fee',
+            amount: fee,
+            description: `Switched from ${currentPlanName} to ${planName} plan — first ${billingInterval} period`,
+            billingInterval,
+            renewsAt: expiresAt,
+            createdAt: now
         });
-        
-        return res.json({ 
-            success: true, 
-            plan: planName, 
-            message: `Downgraded to ${planName} plan. Your daily save limit is now ₦${targetPlan.dailyMax.toLocaleString()}/day with ${targetPlan.interestRate}% interest.`
-        });
+
+        const response = {
+            success: true,
+            plan: planName,
+            billingInterval,
+            renewsAt: expiresAt.toISOString(),
+            message: `Switched to ${planName} plan (${billingInterval}). You now save up to ₦${targetPlan.max.toLocaleString()}/day and earn ${targetPlan.interestRate}% interest. Next renewal: ${expiresAt.toLocaleDateString()} for ₦${fee.toLocaleString()}.`
+        };
+
+        if (idempotencyKey) {
+            await db.collection('upgradeIdempotency')
+                .doc(`${userId}_${idempotencyKey}`)
+                .set({ response, createdAt: new Date() });
+        }
+
+        return res.json(response);
     }
-    
+
     res.status(400).json({ error: 'Unable to process plan change' });
 });
 

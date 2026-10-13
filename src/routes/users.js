@@ -95,6 +95,8 @@
 
 // module.exports = router;
 
+
+// TheSpark\thespark-backend\src\routes\users.js
 const express = require('express');
 const { db } = require('../services/firebase');
 const admin = require('firebase-admin');
@@ -883,26 +885,117 @@ router.get('/me', authenticate, async (req, res) => {
 });
 
 
-
 // ============ GET TRANSACTIONS ============
+// Cursor-based pagination + Firestore-level filter + server-side stats.
+// Query params:
+//   limit  — number of items per page (default 20, max 100)
+//   cursor — opaque cursor from previous page (optional)
+//   filter — 'all' | 'credit' | 'debit' (default 'all')
+// Returns:
+//   { transactions: [...], nextCursor: string | null, stats: {...} | null }
 router.get('/transactions', authenticate, async (req, res) => {
-    const userId = req.user.uid;
-    const { limit = 50 } = req.query;
-    
-    const snapshot = await db.collection('transactions')
-        .where('userId', '==', userId)
-        .get();
-    
-    const transactions = [];
-    snapshot.forEach(doc => transactions.push({ id: doc.id, ...doc.data() }));
-    
-    transactions.sort((a, b) => {
-        const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
-        const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
-        return dateB - dateA;
-    });
-    
-    res.json(transactions.slice(0, parseInt(limit)));
+    try {
+        const userId = req.user.uid;
+
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+        const cursor = req.query.cursor || null;
+        const filter = ['all', 'credit', 'debit'].includes(req.query.filter)
+            ? req.query.filter
+            : 'all';
+
+        // Cursor format: "<ISO timestamp>|<docId>"
+        let cursorDate = null;
+        if (cursor) {
+            const [dateStr] = cursor.split('|');
+            cursorDate = new Date(dateStr);
+            if (isNaN(cursorDate.getTime())) cursorDate = null;
+        }
+
+        // Build the base query
+        let query = db.collection('transactions')
+            .where('userId', '==', userId);
+
+        // ✅ Filter at Firestore level so pagination returns the right items
+        if (filter === 'credit') {
+            query = query.where('type', 'in', ['deposit', 'interest']);
+        } else if (filter === 'debit') {
+            query = query.where('type', 'in', [
+                'withdrawal',
+                'premium_fee',
+                'premium_plan_fee',
+                'plan_change',
+            ]);
+        }
+
+        query = query
+            .orderBy('createdAt', 'desc')
+            .limit(limit);
+
+        if (cursorDate) {
+            query = query.startAfter(cursorDate);
+        }
+
+        const snapshot = await query.get();
+
+        const normalizeIso = (val) => {
+            if (!val) return null;
+            if (typeof val.toDate === 'function') return val.toDate().toISOString();
+            if (typeof val._seconds === 'number') return new Date(val._seconds * 1000).toISOString();
+            if (typeof val.seconds === 'number') return new Date(val.seconds * 1000).toISOString();
+            if (typeof val === 'string') return val;
+            return null;
+        };
+
+        const transactions = snapshot.docs.map((doc) => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                type: data.type,
+                amount: data.amount || 0,
+                description: data.description || null,
+                billingInterval: data.billingInterval || null,
+                createdAt: normalizeIso(data.createdAt),
+            };
+        });
+
+        // nextCursor from the last doc
+        const lastDoc = snapshot.docs[snapshot.docs.length - 1];
+        let nextCursor = null;
+        if (lastDoc && snapshot.docs.length === limit) {
+            const lastIso = normalizeIso(lastDoc.data().createdAt);
+            if (lastIso) nextCursor = `${lastIso}|${lastDoc.id}`;
+        }
+
+        // Stats — computed server-side on first page only (no cursor)
+        let stats = null;
+        if (!cursor) {
+            const allSnap = await db.collection('transactions')
+                .where('userId', '==', userId)
+                .get();
+
+            let deposits = 0, withdrawals = 0, interest = 0, fees = 0;
+            allSnap.forEach((doc) => {
+                const d = doc.data();
+                const amt = d.amount || 0;
+                if (d.type === 'deposit') deposits += amt;
+                else if (d.type === 'withdrawal') withdrawals += amt;
+                else if (d.type === 'interest') interest += amt;
+                else if (d.type === 'premium_fee' || d.type === 'premium_plan_fee') fees += amt;
+            });
+
+            stats = {
+                totalDeposits: deposits,
+                totalWithdrawals: withdrawals,
+                totalInterest: interest,
+                totalPremiumFees: fees,
+            };
+        }
+
+        res.json({ transactions, nextCursor, stats });
+    } catch (error) {
+        console.error('Error fetching transactions:', error);
+        res.status(500).json({ error: 'Failed to load transactions' });
+    }
 });
 
 // ============ GET INTEREST HISTORY ============
