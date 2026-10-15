@@ -241,11 +241,11 @@ const router = express.Router();
 
 // Helper function to calculate badge based on savings
 function calculateBadge(savedAmount) {
-    if (savedAmount >= 500000) return { text: 'Platinum Saver', icon: '💎', level: 6 };
-    if (savedAmount >= 250000) return { text: 'Gold Saver', icon: '🥇', level: 5 };
-    if (savedAmount >= 100000) return { text: 'Silver Saver', icon: '🥈', level: 4 };
-    if (savedAmount >= 50000) return { text: 'Bronze Saver', icon: '🥉', level: 3 };
-    if (savedAmount >= 25000) return { text: 'Rising Star', icon: '⭐', level: 2 };
+    if (savedAmount >= 100000) return { text: 'Platinum Saver', icon: '💎', level: 6 };
+    if (savedAmount >= 50000)  return { text: 'Gold Saver', icon: '🥇', level: 5 };
+    if (savedAmount >= 25000)  return { text: 'Silver Saver', icon: '🥈', level: 4 };
+    if (savedAmount >= 10000)  return { text: 'Bronze Saver', icon: '🥉', level: 3 };
+    if (savedAmount >= 5000)   return { text: 'Rising Star', icon: '⭐', level: 2 };
     return { text: 'Verified Saver', icon: '✓', level: 1 };
 }
 
